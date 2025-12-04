@@ -1,34 +1,40 @@
-name: Stock Analysis Auto Check
+name: Stock Analysis Workflow
 
 on:
   schedule:
-    # 日本時間 9:00 (UTC 0:00) に実行
-    - cron: '0 0 * * 1-5'
-  # 手動実行ボタン
-  workflow_dispatch:
+    # 日本時間の朝9時 (UTC 0:00) に定期実行する場合の例
+    - cron: '0 0 * * *'
+  workflow_dispatch: # 手動実行ボタンを有効化
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: リポジトリをチェックアウト
-        uses: actions/checkout@v3
+    - uses: actions/checkout@v3
 
-      - name: Pythonをセットアップ
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.12' # ★ここを 3.10 から 3.12 に変更しました
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
 
-      - name: ライブラリをインストール
-        run: |
-          python -m pip install --upgrade pip
-          # numpyのバージョン問題を防ぐため、先に古いnumpyを入れるおまじない
-          pip install "numpy<2.0.0"
-          pip install -r requirements.txt
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        # requirements.txt がある場合
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        # ない場合は直接インストール
+        # pip install requests yfinance pandas mplfinance
 
-      - name: 分析スクリプトを実行
-        env:
-          GAS_URL: ${{ secrets.GAS_URL }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-        run: |
-          python notify.py
+    - name: Run Analysis and Notify
+      # ▼▼▼ ここが重要です ▼▼▼
+      # Secretsの値を環境変数(env)にセットして、Pythonから os.getenv で読めるようにします
+      env:
+        CHANNEL_ACCESS_TOKEN: ${{ secrets.CHANNEL_ACCESS_TOKEN }}
+        MY_USER_ID: ${{ secrets.MY_USER_ID }}
+        # もしSlackなども使うなら以下も追加
+        # SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      # ▲▲▲ ここまで ▲▲▲
+      run: |
+        # メッセージ引数を指定して実行
+        python notify.py "GitHub Actionsからの通知テストです" --title "定期実行レポート"
