@@ -3,9 +3,8 @@ name: Stock Analysis Auto Check
 on:
   schedule:
     # 日本時間 9:00 (UTC 0:00) に実行
-    # cron構文: 分 時 日 月 曜日 (1-5=平日)
     - cron: '0 0 * * 1-5'
-  # 手動でも実行できるようにするボタン
+  # 手動実行ボタン
   workflow_dispatch:
 
 jobs:
@@ -18,10 +17,13 @@ jobs:
       - name: Pythonをセットアップ
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
+          python-version: '3.12' # ★ここを 3.10 から 3.12 に変更しました
 
       - name: ライブラリをインストール
         run: |
+          python -m pip install --upgrade pip
+          # numpyのバージョン問題を防ぐため、先に古いnumpyを入れるおまじない
+          pip install "numpy<2.0.0"
           pip install -r requirements.txt
 
       - name: 分析スクリプトを実行
