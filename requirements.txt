@@ -3,6 +3,5 @@ yfinance
 pandas
 pandas_ta
 mplfinance
-japanize_matplotlib
 backtesting
 requests
