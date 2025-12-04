@@ -195,9 +195,27 @@ def send_notification(message, title="通知"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='各チャットツールへ通知を送信します')
-    parser.add_argument('message', type=str, nargs='?', default='(メッセージなし)', help='送信するメッセージ内容')
+    parser.add_argument('message', type=str, nargs='?', help='送信するメッセージ内容')
     parser.add_argument('--title', type=str, default='Notify Script', help='通知のタイトル')
     
     args = parser.parse_args()
     
-    send_notification(args.message, args.title)
+    # 送信メッセージの決定ロジック
+    message = args.message
+    
+    # 1. 引数でメッセージが指定されていない場合、パイプ(標準入力)を確認する
+    #    例: python main.py | python notify.py
+    if not message and not sys.stdin.isatty():
+        try:
+            stdin_text = sys.stdin.read().strip()
+            if stdin_text:
+                message = stdin_text
+        except Exception as e:
+            print(f"[WARN] 標準入力の読み込み中にエラーが発生しました: {e}")
+
+    # 2. それでもメッセージがない場合のデフォルト
+    if not message:
+        message = "(メッセージなし: 分析結果などのデータが渡されていません)"
+        print("[WARN] 送信すべきメッセージが見つかりませんでした。")
+
+    send_notification(message, args.title)
