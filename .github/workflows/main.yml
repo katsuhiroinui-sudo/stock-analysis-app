@@ -1,0 +1,32 @@
+name: Stock Analysis Auto Check
+
+on:
+  schedule:
+    # 日本時間 9:00 (UTC 0:00) に実行
+    # cron構文: 分 時 日 月 曜日 (1-5=平日)
+    - cron: '0 0 * * 1-5'
+  # 手動でも実行できるようにするボタン
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v3
+
+      - name: Pythonをセットアップ
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: ライブラリをインストール
+        run: |
+          pip install -r requirements.txt
+
+      - name: 分析スクリプトを実行
+        env:
+          GAS_URL: ${{ secrets.GAS_URL }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: |
+          python notify.py
