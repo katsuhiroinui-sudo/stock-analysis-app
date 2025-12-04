@@ -1,119 +1,152 @@
-import yfinance as yf
-import pandas as pd
-import pandas_ta as ta
 import requests
-import json
 import os
-from backtesting import Backtest, Strategy
-from backtesting.lib import crossover
-from backtesting.test import SMA
+import sys
+import argparse
+import json
+from datetime import datetime
 
-# ---------------------------------------------------------
-# 設定エリア
-# ---------------------------------------------------------
-# 監視する銘柄リスト (ここに監視したい銘柄をすべて書いてください)
-TICKERS = ["7453.T", "7203.T", "8306.T", "9984.T", "7011.T", "8136.T", "7974.T", "6758.T"]
+"""
+notify.py - 通知送信ユーティリティ
 
-# GitHubの設定(Secrets)から読み込む
-GAS_URL = os.environ.get("GAS_URL")
-LINE_USER_ID = os.environ.get("LINE_USER_ID") # ない場合はGAS側のバックアップが使われます
+使用方法:
+    1. 必要なライブラリをインストール: pip install requests
+    2. トークン/Webhook URLを設定 (環境変数 または コード内の定数を書き換え)
+    3. 実行: 
+       python notify.py "こんにちは" --title "テスト通知"
+       または、他のスクリプトから import して使用:
+       from notify import send_notification
+       send_notification("処理が完了しました")
+"""
 
-# ---------------------------------------------------------
-# ロジック定義 (HybridStrategy) - app.pyと同じもの
-# ---------------------------------------------------------
-class HybridStrategy(Strategy):
-    n1 = 10; n2 = 30; rsi_period = 14; rsi_upper = 70; rsi_lower = 30; adx_period = 14; adx_threshold = 25
-    def init(self):
-        self.sma1 = self.I(SMA, self.data.Close, self.n1)
-        self.sma2 = self.I(SMA, self.data.Close, self.n2)
-        self.rsi = self.I(ta.rsi, pd.Series(self.data.Close), length=self.rsi_period)
-        self.adx = self.I(lambda x, y, z: ta.adx(x, y, z, length=self.adx_period)['ADX_14'],
-                          pd.Series(self.data.High), pd.Series(self.data.Low), pd.Series(self.data.Close))
-    def next(self):
-        if self.adx[-1] > self.adx_threshold:
-            if crossover(self.sma1, self.sma2): self.buy()
-            elif crossover(self.sma2, self.sma1): self.position.close()
-        else:
-            if self.rsi[-1] < self.rsi_lower and not self.position: self.buy()
-            elif self.rsi[-1] > self.rsi_upper: self.position.close()
+# ==========================================
+# 設定エリア (ここに直接書き込むか、環境変数を設定してください)
+# ==========================================
 
-# Flex Message作成関数
-def create_flex_message(ticker, price, signal, profit_factor, return_rate):
-    color = "#E63946" if "買い" in signal else "#1D3557"
-    return {
-      "type": "bubble",
-      "body": {
-        "type": "box", "layout": "vertical",
-        "contents": [
-          {"type": "text", "text": "🔔 自動定期チェック", "color": "#1DB446", "size": "xs", "weight": "bold"},
-          {"type": "text", "text": ticker, "size": "xl", "weight": "bold"},
-          {"type": "text", "text": f"¥{price:,.0f}", "size": "xxl", "weight": "bold", "color": "#333333"},
-          {"type": "separator", "margin": "md"},
-          {"type": "box", "layout": "vertical", "margin": "md", "contents": [
-              {"type": "text", "text": f"判定: {signal}", "color": color, "weight": "bold", "size": "md"},
-              {"type": "text", "text": f"収益率: {return_rate}% / PF: {profit_factor}", "color": "#666666", "size": "xs"}
-          ]}
-        ]
-      },
-      "footer": {
-        "type": "box", "layout": "vertical", "contents": [
-          {"type": "button", "action": {"type": "uri", "label": "詳細を確認する", "uri": f"https://finance.yahoo.co.jp/quote/{ticker}"}}
-        ]
-      }
-    }
+# LINE Notify設定
+# 取得方法: https://notify-bot.line.me/my/
+LINE_NOTIFY_TOKEN = os.getenv('LINE_NOTIFY_TOKEN', '')  # 例: 'YOUR_LINE_TOKEN'
 
-# ---------------------------------------------------------
-# メイン処理
-# ---------------------------------------------------------
-def main():
-    if not GAS_URL:
-        print("エラー: GAS_URLが設定されていません。")
+# Slack Webhook設定
+# 取得方法: https://api.slack.com/messaging/webhooks
+SLACK_WEBHOOK_URL = os.getenv('SLACK_WEBHOOK_URL', '')  # 例: 'https://hooks.slack.com/services/...'
+
+# Discord Webhook設定
+# 取得方法: チャンネル設定 -> 連携サービス -> Webhook
+DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL', '') # 例: 'https://discord.com/api/webhooks/...'
+
+# ==========================================
+
+def send_line_notify(message, token):
+    """LINE Notify APIを使用してメッセージを送信する"""
+    if not token:
+        return
+    
+    api_url = 'https://notify-api.line.me/api/notify'
+    headers = {'Authorization': f'Bearer {token}'}
+    data = {'message': f'\n{message}'}
+    
+    try:
+        response = requests.post(api_url, headers=headers, data=data, timeout=10)
+        response.raise_for_status()
+        print(f"[INFO] LINE送信成功: {response.status_code}")
+    except requests.exceptions.RequestException as e:
+        print(f"[ERROR] LINE送信失敗: {e}")
+
+def send_slack_notify(message, webhook_url, title=None):
+    """Slack Webhookを使用してメッセージを送信する"""
+    if not webhook_url:
         return
 
-    print(f"🔍 {len(TICKERS)} 銘柄の自動分析を開始します...")
-    
-    for ticker in TICKERS:
-        try:
-            # データ取得
-            df = yf.download(ticker, period="730d", interval="1h", auto_adjust=True, progress=False)
-            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-            df = df.dropna()
-            
-            if len(df) > 100:
-                # バックテスト
-                bt = Backtest(df, HybridStrategy, cash=1000000, commission=0.001)
-                stats = bt.run()
-                
-                # シグナル判定
-                trades = stats['_trades']
-                # 「現在ポジションを持っている」場合のみ通知対象
-                if len(trades) > 0 and pd.isna(trades.iloc[-1]['ExitTime']):
-                    last_signal = "🟢 買い保有中"
-                    current_price = df['Close'].iloc[-1]
-                    
-                    print(f"送信中: {ticker} はチャンス銘柄です")
-                    
-                    # LINE送信
-                    flex = create_flex_message(
-                        ticker, 
-                        current_price, 
-                        last_signal, 
-                        f"{stats['Profit Factor']:.2f}", 
-                        f"{stats['Return [%]']:.1f}"
-                    )
-                    
-                    payload = {
-                        "mode": "push",
-                        "userId": LINE_USER_ID, # 設定がなければNoneになりGAS側バックアップが動作
-                        "flexContents": flex
-                    }
-                    
-                    requests.post(GAS_URL, json=payload)
-                else:
-                    print(f"対象外: {ticker}")
+    payload = {
+        "text": message
+    }
+    if title:
+        payload["blocks"] = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": title
+                }
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": message
+                }
+            }
+        ]
 
-        except Exception as e:
-            print(f"エラー ({ticker}): {e}")
+    try:
+        response = requests.post(
+            webhook_url, 
+            data=json.dumps(payload),
+            headers={'Content-Type': 'application/json'},
+            timeout=10
+        )
+        response.raise_for_status()
+        print(f"[INFO] Slack送信成功: {response.status_code}")
+    except requests.exceptions.RequestException as e:
+        print(f"[ERROR] Slack送信失敗: {e}")
+
+def send_discord_notify(message, webhook_url, title=None):
+    """Discord Webhookを使用してメッセージを送信する"""
+    if not webhook_url:
+        return
+
+    content = message
+    if title:
+        content = f"**{title}**\n{message}"
+
+    payload = {
+        "content": content
+    }
+
+    try:
+        response = requests.post(
+            webhook_url,
+            data=json.dumps(payload),
+            headers={'Content-Type': 'application/json'},
+            timeout=10
+        )
+        response.raise_for_status()
+        print(f"[INFO] Discord送信成功: {response.status_code}")
+    except requests.exceptions.RequestException as e:
+        print(f"[ERROR] Discord送信失敗: {e}")
+
+def send_notification(message, title="通知"):
+    """
+    設定されている全ての通知手段でメッセージを送信する
+    """
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    full_message = f"[{timestamp}] {message}"
+    
+    print("-" * 30)
+    print(f"通知処理開始: {title}")
+    
+    # 各サービスへの送信試行
+    if LINE_NOTIFY_TOKEN:
+        send_line_notify(full_message, LINE_NOTIFY_TOKEN)
+    
+    if SLACK_WEBHOOK_URL:
+        send_slack_notify(full_message, SLACK_WEBHOOK_URL, title)
+
+    if DISCORD_WEBHOOK_URL:
+        send_discord_notify(full_message, DISCORD_WEBHOOK_URL, title)
+        
+    if not any([LINE_NOTIFY_TOKEN, SLACK_WEBHOOK_URL, DISCORD_WEBHOOK_URL]):
+        print("[WARN] 通知先トークン/URLが設定されていません。コンソール出力のみ行います。")
+        print(f"Message: {full_message}")
+        
+    print("-" * 30)
 
 if __name__ == "__main__":
-    main()
+    # コマンドライン引数の処理
+    parser = argparse.ArgumentParser(description='各チャットツールへ通知を送信します')
+    parser.add_argument('message', type=str, help='送信するメッセージ内容')
+    parser.add_argument('--title', type=str, default='Notify Script', help='通知のタイトル (Slack/Discord用)')
+    
+    args = parser.parse_args()
+    
+    send_notification(args.message, args.title)
