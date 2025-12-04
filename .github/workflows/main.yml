@@ -27,14 +27,14 @@ jobs:
         # pip install requests yfinance pandas mplfinance
 
     - name: Run Analysis and Notify
-      # ▼▼▼ ここが重要です ▼▼▼
-      # Secretsの値を環境変数(env)にセットして、Pythonから os.getenv で読めるようにします
+      # ▼ Secretsの値を環境変数(env)にセットして、Pythonから os.getenv で読めるようにします
       env:
         CHANNEL_ACCESS_TOKEN: ${{ secrets.CHANNEL_ACCESS_TOKEN }}
         MY_USER_ID: ${{ secrets.MY_USER_ID }}
         # もしSlackなども使うなら以下も追加
         # SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-      # ▲▲▲ ここまで ▲▲▲
+      
+      # ▼▼▼ 修正箇所 ▼▼▼
+      # 分析スクリプト(main.py)を実行し、その出力結果をパイプ(|)で通知スクリプト(notify.py)に渡します
       run: |
-        # メッセージ引数を指定して実行
-        python notify.py "GitHub Actionsからの通知テストです" --title "定期実行レポート"
+        python main.py | python notify.py --title "株価分析レポート"
