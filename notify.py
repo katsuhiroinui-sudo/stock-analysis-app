@@ -13,6 +13,10 @@ notify.py - 通知送信ユーティリティ
     2. トークン/Webhook URLを設定 (環境変数 または コード内の定数を書き換え)
     3. 実行: 
        python notify.py "こんにちは" --title "テスト通知"
+       
+       # 引数なしでも実行可能になりました（デフォルトメッセージが送信されます）
+       python notify.py 
+       
        または、他のスクリプトから import して使用:
        from notify import send_notification
        send_notification("処理が完了しました")
@@ -144,7 +148,8 @@ def send_notification(message, title="通知"):
 if __name__ == "__main__":
     # コマンドライン引数の処理
     parser = argparse.ArgumentParser(description='各チャットツールへ通知を送信します')
-    parser.add_argument('message', type=str, help='送信するメッセージ内容')
+    # nargs='?' と default を指定することで、引数なしでもエラーにならないように修正
+    parser.add_argument('message', type=str, nargs='?', default='(メッセージなし)', help='送信するメッセージ内容')
     parser.add_argument('--title', type=str, default='Notify Script', help='通知のタイトル (Slack/Discord用)')
     
     args = parser.parse_args()
