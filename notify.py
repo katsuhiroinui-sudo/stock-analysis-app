@@ -22,8 +22,6 @@ GASのスクリプトプロパティはGitHub Actionsには共有されません
 # ==========================================
 
 # 1. LINE Messaging API設定
-# ここに直接書き込む場合は '' の中に記入してください
-# 例: 'eyJhbGciOiHIUzI1NiJ9...'
 CHANNEL_ACCESS_TOKEN = os.getenv('CHANNEL_ACCESS_TOKEN', '') 
 MY_USER_ID = os.getenv('MY_USER_ID', '')
 
@@ -50,8 +48,6 @@ def send_line_messaging_api(message, token, user_id):
         'Authorization': f'Bearer {token}'
     }
     
-    # Flex Message等の複雑なJSONを送る場合はここを拡張しますが、
-    # まずは確実に届くテキストメッセージで検証します。
     payload = {
         'to': user_id,
         'messages': [
@@ -163,6 +159,11 @@ def send_notification(message, title="通知"):
     check_settings()
     
     notify_sent = False
+    
+    # 送信先が一つも設定されていない場合はエラーにする
+    if not any([CHANNEL_ACCESS_TOKEN and MY_USER_ID, LINE_NOTIFY_TOKEN, SLACK_WEBHOOK_URL, DISCORD_WEBHOOK_URL]):
+        print("[ERROR] 通知先の設定が一つも見つかりません。環境変数を確認してください。")
+        sys.exit(1)
 
     # 1. LINE Messaging API (優先)
     if CHANNEL_ACCESS_TOKEN and MY_USER_ID:
@@ -185,12 +186,10 @@ def send_notification(message, title="通知"):
             notify_sent = True
         
     if not notify_sent:
-        print("\n[WARN] 通知が送信されませんでした。")
-        print("考えられる原因:")
-        print("1. GitHub Actionsの場合: Secretsに 'CHANNEL_ACCESS_TOKEN' と 'MY_USER_ID' が設定されていない、またはワークフロー(YAML)でenvとして渡されていない。")
-        print("2. ローカル実行の場合: 環境変数が設定されていない。")
-        print("解決策: Canvas上部の '設定エリア' に直接トークンを書き込んで再試行してください。")
-        print(f"\n送信しようとしたメッセージ: {full_message}")
+        print("\n[WARN] 通知送信処理が失敗しました。")
+        print("Secretsの設定値や有効期限を確認してください。")
+        # GitHub Actionsで失敗(赤色)として扱うために終了コード1を返す
+        sys.exit(1)
         
     print("-" * 30)
 
