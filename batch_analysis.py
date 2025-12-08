@@ -4,6 +4,7 @@ import pandas_ta as ta
 from datetime import datetime
 import json
 import sys
+import math
 
 # ==========================================
 # 監視銘柄リスト
@@ -12,6 +13,12 @@ TICKERS = [
     "7453.T", "7203.T", "8306.T", "9984.T", "7011.T", 
     "8136.T", "6752.T", "6501.T", "6758.T", "7267.T"
 ]
+
+def clean_value(val):
+    """NaNをNoneに変換してJSON準拠にする"""
+    if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+        return None
+    return val
 
 def get_ticker_data(ticker):
     """銘柄データを取得し、辞書形式で返す"""
@@ -31,41 +38,47 @@ def get_ticker_data(ticker):
         latest = df.iloc[-1]
         prev = df.iloc[-2]
         
-        # 値の抽出（float変換して安全に扱う）
-        close = float(latest['Close'])
-        rsi = float(latest['RSI_14'])
-        sma5 = float(latest['SMA_5'])
-        sma25 = float(latest['SMA_25'])
+        # 値の抽出（float変換 + NaN対策）
+        close = clean_value(float(latest['Close']))
+        rsi = clean_value(float(latest['RSI_14']))
+        sma5 = clean_value(float(latest['SMA_5']))
+        sma25 = clean_value(float(latest['SMA_25']))
         
-        prev_sma5 = float(prev['SMA_5'])
-        prev_sma25 = float(prev['SMA_25'])
+        prev_sma5 = clean_value(float(prev['SMA_5']))
+        prev_sma25 = clean_value(float(prev['SMA_25']))
         
-        # --- シグナル判定 ---
+        # データがNoneなら計算できないのでスキップ等の処理も可能だが
+        # ここでは安全に比較できるよう 0 扱いにしてシグナル判定を行うか、
+        # 判定自体をスキップする実装にする。
+        # (簡易的に値がある場合のみ判定へ進む)
+        
         signals = []
         signal_color = "#555555" # デフォルト文字色(グレー)
 
-        # RSI判定
-        if rsi < 30:
-            signals.append("🔵 売られすぎ")
-            signal_color = "#0000ff" # 青
-        elif rsi > 70:
-            signals.append("🔴 買われすぎ")
-            signal_color = "#ff0000" # 赤
-            
-        # ゴールデンクロス/デッドクロス
-        if prev_sma5 < prev_sma25 and sma5 > sma25:
-            signals.append("📈 Gクロス(買)")
-            signal_color = "#ff0000" # 赤(強調)
-        elif prev_sma5 > prev_sma25 and sma5 < sma25:
-            signals.append("📉 Dクロス(売)")
-            signal_color = "#0000ff" # 青
-            
+        # 全ての指標が揃っている場合のみ判定
+        if all(v is not None for v in [rsi, sma5, sma25, prev_sma5, prev_sma25]):
+            # RSI判定
+            if rsi < 30:
+                signals.append("🔵 売られすぎ")
+                signal_color = "#0000ff" # 青
+            elif rsi > 70:
+                signals.append("🔴 買われすぎ")
+                signal_color = "#ff0000" # 赤
+                
+            # ゴールデンクロス/デッドクロス
+            if prev_sma5 < prev_sma25 and sma5 > sma25:
+                signals.append("📈 Gクロス(買)")
+                signal_color = "#ff0000" # 赤(強調)
+            elif prev_sma5 > prev_sma25 and sma5 < sma25:
+                signals.append("📉 Dクロス(売)")
+                signal_color = "#0000ff" # 青
+        
         return {
             "ticker": ticker,
-            "close": close,
-            "rsi": rsi,
-            "sma5": sma5,
-            "sma25": sma25,
+            "close": close if close is not None else 0,
+            "rsi": rsi if rsi is not None else 0,
+            "sma5": sma5 if sma5 is not None else 0,
+            "sma25": sma25 if sma25 is not None else 0,
             "signals": signals,
             "signal_color": signal_color
         }
@@ -124,7 +137,7 @@ def create_flex_message(results):
                 },
                 {
                     "type": "text",
-                    "text": f"{data['close']:,.0f}円", # 整数表示(カンマ区切り)
+                    "text": f"{data['close']:,.0f}円", 
                     "weight": "bold",
                     "size": "md",
                     "align": "end",
@@ -168,7 +181,7 @@ def create_flex_message(results):
         # 区切り線
         contents.append({"type": "separator", "margin": "md"})
 
-    # フッター（クレジットなど）
+    # フッター
     contents.append({
         "type": "box",
         "layout": "vertical",
