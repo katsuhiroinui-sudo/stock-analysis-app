@@ -2,13 +2,17 @@ name: Stock Analysis Workflow
 
 on:
   schedule:
-    # 日本時間の朝9時 (UTC 0:00) に定期実行
+    # GitHub ActionsのcronはUTC基準です。
+    # UTC 0:00 = JST 9:00 (日本時間の朝9時)
     - cron: '0 0 * * *'
-  workflow_dispatch: # 手動実行ボタンを有効化
+  workflow_dispatch: # 手動実行ボタン
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    # タイムゾーンをJSTに設定（ログ等の時刻表示用）
+    env:
+      TZ: 'Asia/Tokyo'
 
     steps:
     - uses: actions/checkout@v3
@@ -27,10 +31,9 @@ jobs:
       env:
         CHANNEL_ACCESS_TOKEN: ${{ secrets.CHANNEL_ACCESS_TOKEN }}
         MY_USER_ID: ${{ secrets.MY_USER_ID }}
-        # Slackなどを使う場合は以下も設定
-        # SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-      
+        # Slack/Discord等は必要に応じて設定
+        
       run: |
-        # 作成した自動実行用スクリプト(batch_analysis.py)を実行し
-        # その出力結果をパイプ(|)で通知スクリプト(notify.py)に渡す
-        python batch_analysis.py | python notify.py --title "株価分析定期レポート"
+        # batch_analysis.py が JSONデータを出力し、
+        # notify.py がそれを受け取って Flex Message として送信します
+        python batch_analysis.py | python notify.py --title "株価分析レポート"
