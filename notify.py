@@ -11,9 +11,8 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 """
-notify.py (スプレッドシート連携版)
-・保有株(Holdings): 毎日必ず通知
-・監視株(Watchlist): シグナル発生時のみ通知
+notify.py (スプレッドシート連携・自動補完版)
+数字4桁のコードを自動で .T 付きに変換して処理します
 """
 
 # ==========================================
@@ -29,7 +28,6 @@ GCP_KEY_JSON = os.getenv('GCP_SERVICE_ACCOUNT_KEY', '')
 def get_tickers_from_sheet():
     """スプレッドシートから保有株と監視株のリストを取得"""
     try:
-        # JSONキーを環境変数から読み込む（文字列から辞書へ変換）
         key_dict = json.loads(GCP_KEY_JSON)
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
@@ -37,14 +35,12 @@ def get_tickers_from_sheet():
 
         sheet = client.open_by_url(SHEET_URL)
         
-        # シート読み込み
         holdings_ws = sheet.worksheet('Holdings')
         watchlist_ws = sheet.worksheet('Watchlist')
         
-        # 辞書形式で取得 {code: name}
-        # get_all_records() はヘッダー(1行目)がある前提
-        holdings = {str(r['Ticker']): r['Name'] for r in holdings_ws.get_all_records() if r['Ticker']}
-        watchlist = {str(r['Ticker']): r['Name'] for r in watchlist_ws.get_all_records() if r['Ticker']}
+        # 数値として取得されても文字列に変換して扱う
+        holdings = {str(r['Ticker']).strip(): r['Name'] for r in holdings_ws.get_all_records() if r['Ticker']}
+        watchlist = {str(r['Ticker']).strip(): r['Name'] for r in watchlist_ws.get_all_records() if r['Ticker']}
         
         return holdings, watchlist
     except Exception as e:
@@ -57,9 +53,15 @@ def analyze_ticker(ticker, name, mode="holding"):
     mode="watching": シグナルがある場合のみレポート作成
     """
     try:
-        # データ取得 (待機時間を少し入れて優しくアクセス)
+        # --- 【修正】コードの正規化 (.Tの自動付与) ---
+        yf_ticker = str(ticker).strip()
+        if yf_ticker.isdigit():
+            yf_ticker = f"{yf_ticker}.T"
+        # ----------------------------------------
+
+        # データ取得
         time.sleep(1) 
-        df = yf.download(ticker, period="3mo", interval="1d", progress=False)
+        df = yf.download(yf_ticker, period="3mo", interval="1d", progress=False)
         
         if df.empty:
             return None
@@ -114,17 +116,14 @@ def analyze_ticker(ticker, name, mode="holding"):
             reasons.append("DC")
             is_signal = True
             
-        # 急騰・急落チェック (±3%以上)
         if abs(price_change_pct) >= 3.0:
             reasons.append(f"急変動({price_change_pct:.1f}%)")
             is_signal = True
 
-        # --- フィルタリングロジック ---
-        # 監視株(watching)の場合、シグナルがなければレポートしない
         if mode == "watching" and not is_signal:
             return None
 
-        # レポート生成
+        # レポート生成 (表示用のコードは元のままシンプルに)
         icon = "👀" if mode == "holding" else "🔔"
         if "買い" in action: icon = "🚀"
         elif "売り" in action: icon = "🔻"
@@ -162,7 +161,6 @@ def send_line_push(message):
 def main():
     print(f"--- 分析開始: {datetime.now()} ---")
     
-    # 1. シートからリスト取得
     if not GCP_KEY_JSON or not SHEET_URL:
         print("[ERROR] Google Sheets設定(Secrets)がありません")
         return
@@ -171,14 +169,12 @@ def main():
     
     reports = []
     
-    # 2. 保有株の分析 (全員レポート)
     if holdings:
         reports.append("【 💰 保有株ポートフォリオ 】")
         for code, name in holdings.items():
             rep = analyze_ticker(code, name, mode="holding")
             if rep: reports.append(rep)
             
-    # 3. 監視株の分析 (動きがある時だけ)
     watch_reports = []
     if watchlist:
         for code, name in watchlist.items():
@@ -193,11 +189,9 @@ def main():
         print("通知対象なし")
         return
 
-    # 4. メッセージ結合と送信 (長すぎる場合は分割送信を検討すべきだが、まずは一括で)
     full_message = f"📊 株価AIレポート ({datetime.now().strftime('%m/%d')})\n\n"
     full_message += "\n".join(reports)
     
-    # 文字数制限対策 (簡易的: 2000文字で切る)
     if len(full_message) > 2000:
         send_line_push(full_message[:2000] + "\n...(省略)...")
     else:
