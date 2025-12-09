@@ -247,12 +247,14 @@ with tab1:
 # ----------------------------------------------------
 with tab2:
     st.subheader("戦略シミュレーション")
+    st.info("過去2年間のデータで売買ルールを検証します。")
+    
     c1, c2, c3 = st.columns(3)
     t2 = c1.selectbox("銘柄", target_tickers, format_func=lambda x: f"{x} : {target_dict.get(x,'')}", key="t2")
     s2 = c2.selectbox("戦略", list(STRATEGY_MAP.keys()), key="s2")
-    cash = c3.number_input("資金(円)", value=1000000, step=100000)
+    cash = c3.number_input("初期資金(円)", value=1000000, step=100000)
     
-    if st.button("検証実行", key="b2"):
+    if st.button("検証実行 ⚔️", key="b2"):
         yf_code = f"{t2}.T" if str(t2).isdigit() else t2
         with st.spinner('シミュレーション中...'):
             try:
@@ -262,11 +264,23 @@ with tab2:
                 bt = Backtest(df, STRATEGY_MAP[s2], cash=cash, commission=.002)
                 stats = bt.run()
                 
+                # --- 結果表示 (アップデート部分) ---
+                final_equity = stats['Equity Final [$]']
+                profit = final_equity - cash
+                buy_hold = stats['Buy & Hold Return [%]']
+                
+                st.markdown(f"### 💰 最終資産: **{int(final_equity):,}円**")
+                
                 c1, c2, c3, c4 = st.columns(4)
-                c1.metric("勝率", f"{stats['Win Rate [%]']:.1f}%")
-                c2.metric("収益率", f"{stats['Return [%]']:.1f}%")
-                c3.metric("取引数", f"{stats['# Trades']}")
-                c4.metric("PF", f"{stats['Profit Factor']:.2f}")
+                c1.metric("収支", f"{int(profit):,}円", delta="プラス" if profit > 0 else "マイナス")
+                c2.metric("総収益率", f"{stats['Return [%]']:.1f}%")
+                c3.metric("勝率", f"{stats['Win Rate [%]']:.1f}%")
+                c4.metric("ガチホ収益率", f"{buy_hold:.1f}%", help="何もせず持ち続けた場合の収益率")
+                
+                st.write("##### 📈 資産の推移")
+                # 資産曲線の表示
+                equity_curve = stats['_equity_curve']
+                st.line_chart(equity_curve['Equity'])
                 
                 with st.expander("詳細データ"): st.dataframe(stats.to_frame().T)
                 
