@@ -5,18 +5,19 @@ import argparse
 import json
 from datetime import datetime
 import yfinance as yf
+import pandas as pd
 import pandas_ta as ta
 
 """
-notify.py (統合版)
-株価データの取得・分析を行い、その結果をLINE Messaging APIで通知します。
+notify.py (統合版・修正済み)
+データのMultiIndex問題に対応し、株価分析結果を通知します。
 """
 
 # ==========================================
 # 設定エリア
 # ==========================================
 
-# 監視銘柄リスト (app.pyと同じもの)
+# 監視銘柄リスト
 TICKERS = [
     "7453.T", "7203.T", "8306.T", "9984.T", "7011.T", 
     "8136.T", "6752.T", "6501.T", "6758.T", "7267.T"
@@ -33,8 +34,14 @@ def analyze_ticker(ticker):
     try:
         # データ取得
         df = yf.download(ticker, period="3mo", interval="1d", progress=False)
+        
         if df.empty:
             return None
+
+        # 【修正ポイント】MultiIndex（2段カラム）になっていたら1段にする
+        # Close, Openなどのカラム名だけに整理します
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
 
         # テクニカル指標計算
         df.ta.rsi(length=14, append=True)
@@ -46,12 +53,14 @@ def analyze_ticker(ticker):
         prev = df.iloc[-2]
         
         # 値の抽出
-        close = float(latest['Close'])
-        rsi = float(latest['RSI_14'])
-        sma5 = float(latest['SMA_5'])
-        sma25 = float(latest['SMA_25'])
-        prev_sma5 = float(prev['SMA_5'])
-        prev_sma25 = float(prev['SMA_25'])
+        # 値が存在しない場合のハンドリングを追加
+        close = float(latest['Close']) if not pd.isna(latest['Close']) else 0
+        rsi = float(latest['RSI_14']) if 'RSI_14' in latest and not pd.isna(latest['RSI_14']) else 50
+        sma5 = float(latest['SMA_5']) if 'SMA_5' in latest and not pd.isna(latest['SMA_5']) else 0
+        sma25 = float(latest['SMA_25']) if 'SMA_25' in latest and not pd.isna(latest['SMA_25']) else 0
+        
+        prev_sma5 = float(prev['SMA_5']) if 'SMA_5' in prev and not pd.isna(prev['SMA_5']) else 0
+        prev_sma25 = float(prev['SMA_25']) if 'SMA_25' in prev and not pd.isna(prev['SMA_25']) else 0
         
         # シグナル判定
         signals = []
@@ -69,6 +78,7 @@ def analyze_ticker(ticker):
         return report
 
     except Exception as e:
+        # エラー詳細を少し分かりやすく
         return f"【{ticker}】 エラー: {e}\n"
 
 def send_line_push(message):
@@ -107,6 +117,8 @@ def main():
             
     if not reports:
         print("[WARN] データが取得できませんでした")
+        # エラーでも通知して気づけるようにする
+        send_line_push("【エラー報告】株価データの取得に失敗しました。ログを確認してください。")
         return
 
     # 全文結合
