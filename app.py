@@ -6,15 +6,17 @@ import mplfinance as mpf
 import matplotlib.font_manager as fm
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import requests
 import json
 import os
 import time
 import streamlit.components.v1 as components
 
-# バックテスト用ライブラリ
-from backtesting import Backtest, Strategy
-from backtesting.lib import crossover
+# バックテスト用ライブラリ (エラー回避)
+try:
+    from backtesting import Backtest, Strategy
+    from backtesting.lib import crossover
+except ImportError:
+    st.error("ライブラリ 'backtesting' が見つかりません。")
 
 # ==========================================
 # 設定エリア
@@ -31,122 +33,124 @@ try:
     pd.options.plotting.backend = 'matplotlib'
     import matplotlib.pyplot as plt
     plt.rc('font', family=font_name)
-except Exception as e:
+except:
     font_name = "sans-serif"
 
 # ==========================================
-# 戦略クラスの定義 (Backtesting.py)
+# 1. AI分析用 戦略クラス定義
 # ==========================================
 
-# 1. SMAクロス戦略
 class SmaCross(Strategy):
     n1 = 5
     n2 = 25
-    
     def init(self):
         close = pd.Series(self.data.Close)
         self.sma1 = self.I(ta.sma, close, self.n1)
         self.sma2 = self.I(ta.sma, close, self.n2)
-    
     def next(self):
-        if crossover(self.sma1, self.sma2):
-            self.buy()
-        elif crossover(self.sma2, self.sma1):
-            self.position.close()
+        if crossover(self.sma1, self.sma2): self.buy()
+        elif crossover(self.sma2, self.sma1): self.position.close()
 
-# 2. RSI逆張り戦略
 class RsiOscillator(Strategy):
-    upper_bound = 70
-    lower_bound = 30
-    rsi_window = 14
-    
+    upper = 70
+    lower = 30
     def init(self):
         close = pd.Series(self.data.Close)
-        self.rsi = self.I(ta.rsi, close, self.rsi_window)
-        
+        self.rsi = self.I(ta.rsi, close, 14)
     def next(self):
-        if crossover(self.rsi, self.lower_bound):
-            self.buy()
-        elif crossover(self.upper_bound, self.rsi):
-            self.position.close()
+        if crossover(self.rsi, self.lower): self.buy()
+        elif crossover(self.upper, self.rsi): self.position.close()
 
-# 3. MACDトレンド戦略
-class MacdStrategy(Strategy):
-    fast = 12
-    slow = 26
-    signal = 9
-    
+class MacdTrend(Strategy):
     def init(self):
         close = pd.Series(self.data.Close)
-        # pandas_taのmacdはDataFrameを返すため、少し工夫が必要
-        # ここでは簡易的にMACDラインとシグナルラインを計算して保持
-        macd_df = ta.macd(close, fast=self.fast, slow=self.slow, signal=self.signal)
-        # 列名: MACD_12_26_9, MACDs_12_26_9, MACDh_12_26_9
-        self.macd = self.I(lambda x: macd_df.iloc[:, 0], close)   # MACD Line
-        self.signal_line = self.I(lambda x: macd_df.iloc[:, 1], close) # Signal Line
-        
+        macd = ta.macd(close, fast=12, slow=26, signal=9)
+        self.macd = self.I(lambda: macd.iloc[:, 0])
+        self.signal = self.I(lambda: macd.iloc[:, 1])
     def next(self):
-        if crossover(self.macd, self.signal_line):
-            self.buy()
-        elif crossover(self.signal_line, self.macd):
-            self.position.close()
+        if crossover(self.macd, self.signal): self.buy()
+        elif crossover(self.signal, self.macd): self.position.close()
 
-# 4. ボリンジャーバンド逆張り戦略
-class BollingerBandsStrategy(Strategy):
-    n = 20
-    std = 2
-    
+class BollingerBands(Strategy):
     def init(self):
         close = pd.Series(self.data.Close)
-        bb = ta.bbands(close, length=self.n, std=self.std)
-        # BBL(下), BBM(中), BBU(上)
-        self.lower = self.I(lambda x: bb.iloc[:, 0], close)
-        self.upper = self.I(lambda x: bb.iloc[:, 2], close)
-        
+        bb = ta.bbands(close, length=20, std=2)
+        self.lower = self.I(lambda: bb.iloc[:, 0])
+        self.upper = self.I(lambda: bb.iloc[:, 2])
     def next(self):
-        # 下バンドを下回ったら買い（逆張り）
-        if self.data.Close < self.lower:
-            if not self.position.is_long:
-                self.buy()
-        # 上バンドを超えたら手仕舞い
-        elif self.data.Close > self.upper:
+        if self.data.Close < self.lower: 
+            if not self.position.is_long: self.buy()
+        elif self.data.Close > self.upper: 
             self.position.close()
 
-# 戦略マッピング
-STRATEGIES = {
-    "SMAクロス (トレンド)": SmaCross,
-    "RSI (逆張り)": RsiOscillator,
-    "MACD (トレンド)": MacdStrategy,
-    "ボリンジャーバンド (逆張り)": BollingerBandsStrategy
-}
+STRATEGIES = [
+    {"name": "SMAクロス", "class": SmaCross},
+    {"name": "RSI逆張り", "class": RsiOscillator},
+    {"name": "MACD", "class": MacdTrend},
+    {"name": "ボリンジャー", "class": BollingerBands}
+]
+STRATEGY_MAP = {s["name"]: s["class"] for s in STRATEGIES}
 
 # ==========================================
-# スプレッドシート接続関数
+# 2. 判定ロジック
 # ==========================================
+def check_current_signal(strategy_name, df):
+    """最新データに基づいて売買シグナルを判定"""
+    try:
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+        close = float(latest['Close'])
+        
+        # 値取得ヘルパー
+        def g(row, k, d=0): return float(row[k]) if k in row and not pd.isna(row[k]) else d
+
+        # 指標値
+        sma5, sma25 = g(latest,'SMA_5'), g(latest,'SMA_25')
+        p_sma5, p_sma25 = g(prev,'SMA_5'), g(prev,'SMA_25')
+        rsi = g(latest,'RSI_14', 50)
+        macd, sig = g(latest,'MACD_12_26_9'), g(latest,'MACDs_12_26_9')
+        p_macd, p_sig = g(prev,'MACD_12_26_9'), g(prev,'MACDs_12_26_9')
+        bbl, bbu = g(latest,'BBL_20_2.0'), g(latest,'BBU_20_2.0')
+
+        if strategy_name == "SMAクロス":
+            if p_sma5 < p_sma25 and sma5 > sma25: return "買い 🚀", "ゴールデンクロス"
+            elif p_sma5 > p_sma25 and sma5 < sma25: return "売り 🔻", "デッドクロス"
+        elif strategy_name == "RSI逆張り":
+            if rsi < 30: return "買い 🚀", f"売られすぎ(RSI{rsi:.0f})"
+            elif rsi > 70: return "売り 🔻", f"買われすぎ(RSI{rsi:.0f})"
+        elif strategy_name == "MACD":
+            if p_macd < p_sig and macd > sig: return "買い 🚀", "MACD上抜け"
+            elif p_macd > p_sig and macd < sig: return "売り 🔻", "MACD下抜け"
+        elif strategy_name == "ボリンジャー":
+            if close < bbl: return "買い 🚀", "バンド下限割れ"
+            elif close > bbu: return "売り 🔻", "バンド上限到達"
+            
+        return "ステイ 🤔", "シグナルなし"
+    except:
+        return "判定不能", "データ不足"
+
+# ==========================================
+# 3. UI & メイン処理
+# ==========================================
+st.set_page_config(page_title="AI株価監視盤", layout="wide")
+st.title("📈 AI株価一括スキャン & 分析アプリ")
+
+# スプシ接続
 def get_sheet_client():
-    if not GCP_KEY_JSON or not SHEET_URL:
-        return None
+    if not GCP_KEY_JSON or not SHEET_URL: return None
     try:
         key_dict = json.loads(GCP_KEY_JSON)
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
         client = gspread.authorize(creds)
         return client.open_by_url(SHEET_URL)
-    except Exception as e:
-        st.error(f"スプレッドシート接続エラー: {e}")
-        return None
+    except: return None
 
-# ==========================================
-# UI & Main Logic
-# ==========================================
-st.set_page_config(page_title="AI株価監視盤", layout="wide")
-st.title("📈 AI株価一括スキャン & 分析アプリ")
-
-# --- サイドバー: 銘柄リスト管理 ---
-st.sidebar.header("📝 銘柄リスト管理")
 sheet = get_sheet_client()
 df_sheet = pd.DataFrame()
 
+# --- サイドバー ---
+st.sidebar.header("📝 銘柄リスト管理")
 if sheet:
     mode = st.sidebar.radio("編集モード", ["保有株 (Holdings)", "監視株 (Watchlist)"])
     ws_name = "Holdings" if "保有" in mode else "Watchlist"
@@ -154,192 +158,190 @@ if sheet:
         ws = sheet.worksheet(ws_name)
         data = ws.get_all_records()
         df_sheet = pd.DataFrame(data)
-        if not df_sheet.empty:
-            df_sheet = df_sheet.astype(str)
+        if not df_sheet.empty: df_sheet = df_sheet.astype(str)
         st.sidebar.write(f"登録数: {len(df_sheet)}銘柄")
         
-        with st.sidebar.expander("➕ 銘柄を追加", expanded=False):
-            with st.form("add_form"):
-                new_code = st.text_input("銘柄コード (数字4桁)")
-                new_name = st.text_input("企業名")
-                submitted = st.form_submit_button("追加する")
-                if submitted and new_code and new_name:
-                    clean_code = new_code.replace('.T', '').replace('.t', '').strip()
-                    if not df_sheet.empty and clean_code in df_sheet['Ticker'].values:
-                        st.sidebar.warning(f"{clean_code} は既に登録されています")
-                    else:
-                        ws.append_row([clean_code, new_name])
-                        st.sidebar.success(f"{new_name} を追加しました！")
+        with st.sidebar.expander("➕ 銘柄を追加"):
+            with st.form("add"):
+                c = st.text_input("コード(数字4桁)")
+                n = st.text_input("企業名")
+                if st.form_submit_button("追加"):
+                    if c and n:
+                        clean = c.replace('.T','').strip()
+                        ws.append_row([clean, n])
+                        st.success("追加しました")
                         time.sleep(1)
                         st.rerun()
         
-        with st.sidebar.expander("🗑️ 銘柄を削除", expanded=False):
+        with st.sidebar.expander("🗑️ 削除"):
             if not df_sheet.empty:
-                st.sidebar.dataframe(df_sheet, use_container_width=True, hide_index=True)
-                del_ticker = st.sidebar.selectbox("削除する銘柄を選択", df_sheet['Ticker'].tolist())
-                if st.sidebar.button("削除実行"):
-                    try:
-                        cell = ws.find(del_ticker)
-                        ws.delete_rows(cell.row)
-                        st.sidebar.success("削除しました")
-                        time.sleep(1)
-                        st.rerun()
-                    except Exception as e:
-                        st.sidebar.error(f"エラー: {e}")
-            else:
-                st.sidebar.info("登録なし")
+                d = st.selectbox("削除銘柄", df_sheet['Ticker'].tolist())
+                if st.button("削除"):
+                    cell = ws.find(d)
+                    ws.delete_rows(cell.row)
+                    st.success("削除しました")
+                    time.sleep(1)
+                    st.rerun()
     except Exception as e:
-        st.sidebar.error(f"シート読み込みエラー: {e}")
+        st.sidebar.error(f"読み込みエラー: {e}")
 else:
-    st.sidebar.warning("⚠️ API設定なし")
+    st.sidebar.warning("API設定なし (GitHub Secretsを確認してください)")
 
-# --- メインエリア: タブ切り替え ---
-tab1, tab2 = st.tabs(["📊 チャート分析", "🧪 バックテスト研究所"])
+# --- メインエリア ---
+tab1, tab2, tab3 = st.tabs(["📊 チャート分析", "🧪 バックテスト研究所", "🤖 AI戦略コンシェルジュ"])
 
-# 銘柄選択（共通）
+# 銘柄リスト準備
 target_tickers = []
 target_dict = {}
 if not df_sheet.empty and 'Ticker' in df_sheet.columns:
     target_tickers = df_sheet['Ticker'].tolist()
     target_dict = dict(zip(df_sheet['Ticker'], df_sheet['Name']))
 else:
+    # デフォルト (APIなし用)
     target_tickers = ["7203", "9984", "8306"]
     target_dict = {t: t for t in target_tickers}
 
-# ==========================================
-# Tab 1: 通常チャート分析
-# ==========================================
+# ----------------------------------------------------
+# Tab 1: チャート分析
+# ----------------------------------------------------
 with tab1:
-    st.subheader("リアルタイム チャート分析")
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        selected_ticker = st.selectbox(
-            "分析する銘柄", target_tickers, 
-            format_func=lambda x: f"{x} : {target_dict.get(x, '')}", key="t1"
-        )
-    with col2:
-        period = st.radio("期間", ["3mo", "6mo", "1y"], horizontal=True, index=1, key="p1")
-
-    if st.button("チャート表示 🚀", key="btn1"):
-        yf_code = str(selected_ticker).strip()
-        if yf_code.isdigit(): yf_code = f"{yf_code}.T"
-
-        with st.spinner('データ取得中...'):
+    st.subheader("リアルタイム チャート")
+    c1, c2 = st.columns(2)
+    t1 = c1.selectbox("銘柄", target_tickers, format_func=lambda x: f"{x} : {target_dict.get(x,'')}", key="t1")
+    p1 = c2.radio("期間", ["3mo", "6mo", "1y"], index=1, horizontal=True, key="p1")
+    
+    if st.button("チャート表示 🚀", key="b1"):
+        yf_code = f"{t1}.T" if str(t1).isdigit() else t1
+        with st.spinner('取得中...'):
             try:
-                df = yf.download(yf_code, period=period, interval='1d', progress=False)
+                df = yf.download(yf_code, period=p1, interval='1d', progress=False)
                 if df.empty:
                     st.error("データなし")
                 else:
-                    if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = df.columns.get_level_values(0)
-
-                    df.ta.rsi(length=14, append=True)
+                    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+                    
+                    # 指標計算
                     df.ta.sma(length=5, append=True)
                     df.ta.sma(length=25, append=True)
                     df.ta.sma(length=75, append=True)
+                    df.ta.rsi(length=14, append=True)
                     
                     latest = df.iloc[-1]
-                    prev = df.iloc[-2]
-                    
-                    st.metric(
-                        label=f"現在値 ({latest.name.strftime('%Y-%m-%d')})",
-                        value=f"{int(latest['Close']):,} 円",
-                        delta=f"{latest['Close'] - prev['Close']:.1f} 円"
-                    )
+                    st.metric("現在値", f"{int(latest['Close']):,} 円", f"{latest['Close']-df.iloc[-2]['Close']:.1f}")
                     
                     plots = [
-                        mpf.make_addplot(df['SMA_5'], color='orange', width=1.0),
-                        mpf.make_addplot(df['SMA_25'], color='skyblue', width=1.0),
-                        mpf.make_addplot(df['SMA_75'], color='green', width=1.0),
+                        mpf.make_addplot(df['SMA_5'], color='orange', width=1),
+                        mpf.make_addplot(df['SMA_25'], color='skyblue', width=1),
+                        mpf.make_addplot(df['SMA_75'], color='green', width=1),
                         mpf.make_addplot(df['RSI_14'], color='purple', panel=2, ylabel='RSI')
                     ]
                     my_style = mpf.make_mpf_style(base_mpf_style='yahoo', rc={'font.family': font_name})
-                    fig, ax = mpf.plot(
-                        df, type='candle', style=my_style, addplot=plots,
-                        title=f"{selected_ticker} - {target_dict.get(selected_ticker, '')}",
-                        volume=True, figsize=(10, 8), panel_ratios=(6, 2, 2), returnfig=True
-                    )
+                    fig, ax = mpf.plot(df, type='candle', style=my_style, addplot=plots, volume=True, returnfig=True,
+                                   title=f"{t1} - {target_dict.get(t1,'')}", figsize=(10,8))
                     st.pyplot(fig)
-                    
-                    rsi_val = latest['RSI_14']
-                    if rsi_val < 30: st.success(f"🔵 RSI {rsi_val:.1f} (売られすぎ)")
-                    elif rsi_val > 70: st.warning(f"🔴 RSI {rsi_val:.1f} (買われすぎ)")
-                    else: st.info(f"RSI {rsi_val:.1f} (中立)")
-
             except Exception as e:
                 st.error(f"エラー: {e}")
 
-# ==========================================
+# ----------------------------------------------------
 # Tab 2: バックテスト研究所
-# ==========================================
+# ----------------------------------------------------
 with tab2:
-    st.subheader("🧪 戦略シミュレーション")
-    st.info("過去のデータを使って、「もしそのルールで売買していたらどうなっていたか？」を検証します。")
+    st.subheader("戦略シミュレーション")
+    c1, c2, c3 = st.columns(3)
+    t2 = c1.selectbox("銘柄", target_tickers, format_func=lambda x: f"{x} : {target_dict.get(x,'')}", key="t2")
+    s2 = c2.selectbox("戦略", list(STRATEGY_MAP.keys()), key="s2")
+    cash = c3.number_input("資金(円)", value=1000000, step=100000)
     
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        bt_ticker = st.selectbox(
-            "検証する銘柄", target_tickers, 
-            format_func=lambda x: f"{x} : {target_dict.get(x, '')}", key="t2"
-        )
-    with col2:
-        strategy_name = st.selectbox("戦略を選択", list(STRATEGIES.keys()))
-    with col3:
-        cash = st.number_input("初期資金 (円)", value=1000000, step=100000)
-
-    if st.button("バックテスト実行 ⚔️", key="btn2"):
-        yf_code = str(bt_ticker).strip()
-        if yf_code.isdigit(): yf_code = f"{yf_code}.T"
-        
+    if st.button("検証実行", key="b2"):
+        yf_code = f"{t2}.T" if str(t2).isdigit() else t2
         with st.spinner('シミュレーション中...'):
             try:
-                # バックテストは長期間で検証したほうが信頼性が高いので2年分取得
-                df_bt = yf.download(yf_code, period="2y", interval='1d', progress=False)
+                df = yf.download(yf_code, period="2y", interval='1d', progress=False)
+                if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
                 
-                if isinstance(df_bt.columns, pd.MultiIndex):
-                    df_bt.columns = df_bt.columns.get_level_values(0)
-                
-                # backtestingライブラリ用のカラム名チェック
-                # Open, High, Low, Close, Volume が必要
-                
-                # 実行
-                bt = Backtest(df_bt, STRATEGIES[strategy_name], cash=cash, commission=.002)
+                bt = Backtest(df, STRATEGY_MAP[s2], cash=cash, commission=.002)
                 stats = bt.run()
                 
-                # --- 結果表示 ---
-                st.markdown("### 🏆 検証結果")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("勝率", f"{stats['Win Rate [%]']:.1f}%")
+                c2.metric("収益率", f"{stats['Return [%]']:.1f}%")
+                c3.metric("取引数", f"{stats['# Trades']}")
+                c4.metric("PF", f"{stats['Profit Factor']:.2f}")
                 
-                # メトリクス表示
-                m1, m2, m3, m4 = st.columns(4)
-                win_rate = stats['Win Rate [%]']
-                ret = stats['Return [%]']
-                trades = stats['# Trades']
-                pf = stats['Profit Factor']
+                with st.expander("詳細データ"): st.dataframe(stats.to_frame().T)
                 
-                m1.metric("勝率", f"{win_rate:.1f}%")
-                m2.metric("総収益率", f"{ret:.1f}%", delta_color="normal" if ret > 0 else "inverse")
-                m3.metric("取引回数", f"{trades}回")
-                m4.metric("プロフィットファクター", f"{pf:.2f}")
-                
-                st.markdown("---")
-                
-                # 詳細データ
-                with st.expander("詳細データを見る"):
-                    st.dataframe(stats.to_frame().T)
-                
-                # チャート表示 (HTML)
-                st.markdown("### 📉 売買ポイントの確認")
-                st.caption("▲: 買いエントリー / ▼: 売り/決済")
-                
-                # プロットをHTMLファイルとして保存し、読み込んで表示
                 try:
                     bt.plot(filename='plot.html', open_browser=False)
                     with open('plot.html', 'r', encoding='utf-8') as f:
-                        html_string = f.read()
-                    components.html(html_string, height=600, scrolling=True)
-                except Exception as plot_e:
-                    st.warning(f"チャート描画エラー: {plot_e}")
-                    st.write("※ 環境によってはインタラクティブチャートが表示できない場合があります。")
-
+                        components.html(f.read(), height=600, scrolling=True)
+                except Exception as pe:
+                    st.warning(f"チャート描画エラー: {pe}")
+                    
             except Exception as e:
-                st.error(f"バックテストエラー: {e}")
+                st.error(f"検証エラー: {e}")
+
+# ----------------------------------------------------
+# Tab 3: AI戦略コンシェルジュ
+# ----------------------------------------------------
+with tab3:
+    st.subheader("🤖 AI戦略コンシェルジュ")
+    st.info("過去2年間のデータを元に、最も勝率の高い戦略で現在の売買判断を行います。")
+    
+    t3 = st.selectbox("診断する銘柄", target_tickers, format_func=lambda x: f"{x} : {target_dict.get(x,'')}", key="t3")
+    
+    if st.button("AI診断を開始 🧠", key="b3"):
+        yf_code = f"{t3}.T" if str(t3).isdigit() else t3
+        
+        with st.spinner("AIが思考中... 全戦略のバックテストを実行しています..."):
+            try:
+                df = yf.download(yf_code, period="2y", interval='1d', progress=False)
+                if df.empty:
+                    st.error("データなし")
+                    st.stop()
+                if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+                
+                # 指標一括計算
+                df.ta.sma(length=5, append=True)
+                df.ta.sma(length=25, append=True)
+                df.ta.rsi(length=14, append=True)
+                df.ta.macd(fast=12, slow=26, signal=9, append=True)
+                df.ta.bbands(length=20, std=2, append=True)
+                
+                results = []
+                progress = st.progress(0)
+                
+                for i, strat in enumerate(STRATEGIES):
+                    try:
+                        bt = Backtest(df, strat["class"], cash=1000000, commission=.002)
+                        stats = bt.run()
+                        action, reason = check_current_signal(strat["name"], df)
+                        
+                        results.append({
+                            "戦略名": strat["name"],
+                            "勝率": stats['Win Rate [%]'],
+                            "収益率": stats['Return [%]'],
+                            "PF": stats['Profit Factor'],
+                            "現在の判定": action,
+                            "根拠": reason
+                        })
+                    except:
+                        pass
+                    progress.progress((i + 1) / len(STRATEGIES))
+                
+                if not results:
+                    st.error("有効な戦略が見つかりませんでした。")
+                else:
+                    res_df = pd.DataFrame(results)
+                    res_df = res_df.sort_values("勝率", ascending=False).reset_index(drop=True)
+                    best = res_df.iloc[0]
+                    
+                    st.success("診断完了！")
+                    st.markdown(f"### 👑 AIの結論: 【{best['現在の判定']}】")
+                    st.write(f"推奨戦略: **{best['戦略名']}** (勝率 {best['勝率']:.1f}%)")
+                    st.write(f"根拠: {best['根拠']}")
+                    
+                    st.markdown("#### 📊 戦略パフォーマンス比較")
+                    st.dataframe(res_df.style.format({"勝率": "{:.1f}%", "収益率": "{:.1f}%", "PF": "{:.2f}"}))
+                
+            except Exception as e:
+                st.error(f"診断エラー: {e}")
