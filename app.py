@@ -9,6 +9,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import requests
 import json
 import os
+import time
 
 # ==========================================
 # 設定エリア
@@ -82,18 +83,21 @@ if sheet:
         # --- 新規追加フォーム ---
         with st.sidebar.expander("➕ 銘柄を追加", expanded=False):
             with st.form("add_form"):
-                new_code = st.text_input("銘柄コード (例: 7203.T)")
-                new_name = st.text_input("企業名 (例: トヨタ)")
+                new_code = st.text_input("銘柄コード (数字4桁)")
+                new_name = st.text_input("企業名")
                 submitted = st.form_submit_button("追加する")
                 
                 if submitted:
                     if new_code and new_name:
-                        # 重複チェック
-                        if not df_sheet.empty and new_code in df_sheet['Ticker'].values:
-                            st.sidebar.warning(f"{new_code} は既に登録されています")
+                        # 【修正】 .T があれば削除して保存
+                        clean_code = new_code.replace('.T', '').replace('.t', '').strip()
+                        
+                        # 重複チェック（現在表示中のリストに対して）
+                        if not df_sheet.empty and clean_code in df_sheet['Ticker'].values:
+                            st.sidebar.warning(f"{clean_code} は既に登録されています")
                         else:
-                            ws.append_row([new_code, new_name])
-                            st.sidebar.success(f"{new_name} を追加しました！")
+                            ws.append_row([clean_code, new_name])
+                            st.sidebar.success(f"{new_name} ({clean_code}) を追加しました！")
                             time.sleep(1) # 反映待ち
                             st.rerun()
                     else:
@@ -143,8 +147,8 @@ if not df_sheet.empty and 'Ticker' in df_sheet.columns:
     # コード: 名称 の辞書作成
     target_dict = dict(zip(df_sheet['Ticker'], df_sheet['Name']))
 else:
-    # データがない場合はデフォルトリスト
-    target_tickers = ["7203.T", "9984.T", "8306.T"]
+    # データがない場合はデフォルトリスト（数字のみ）
+    target_tickers = ["7203", "9984", "8306"]
     target_dict = {t: t for t in target_tickers}
 
 # セレクトボックス（企業名も表示）
@@ -158,10 +162,15 @@ selected_ticker = st.selectbox(
 period = st.radio("期間", ["3mo", "6mo", "1y"], horizontal=True, index=1)
 
 if st.button("分析開始 🚀"):
-    with st.spinner(f'{selected_ticker} のデータを取得中...'):
+    # 【修正】 .T を自動付与してデータ取得
+    yf_code = str(selected_ticker).strip()
+    if yf_code.isdigit():
+        yf_code = f"{yf_code}.T"
+
+    with st.spinner(f'{yf_code} のデータを取得中...'):
         try:
             # データ取得
-            df = yf.download(selected_ticker, period=period, interval='1d', progress=False)
+            df = yf.download(yf_code, period=period, interval='1d', progress=False)
             
             if df.empty:
                 st.error("データが取得できませんでした。コードが正しいか確認してください。")
@@ -178,10 +187,12 @@ if st.button("分析開始 🚀"):
                 
                 # 直近データ表示
                 latest = df.iloc[-1]
+                prev = df.iloc[-2]
+                
                 st.metric(
                     label=f"現在値 ({latest.name.strftime('%Y-%m-%d')})",
                     value=f"{int(latest['Close']):,} 円",
-                    delta=f"{latest['Close'] - df.iloc[-2]['Close']:.1f} 円"
+                    delta=f"{latest['Close'] - prev['Close']:.1f} 円"
                 )
                 
                 # チャート描画 (mplfinance)
