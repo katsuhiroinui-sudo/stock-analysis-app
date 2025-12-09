@@ -264,23 +264,45 @@ with tab2:
                 bt = Backtest(df, STRATEGY_MAP[s2], cash=cash, commission=.002)
                 stats = bt.run()
                 
-                # --- 結果表示 (アップデート部分) ---
+                # --- 結果計算 ---
+                # 戦略の成績
                 final_equity = stats['Equity Final [$]']
                 profit = final_equity - cash
-                buy_hold = stats['Buy & Hold Return [%]']
+                return_pct = stats['Return [%]']
+                win_rate = stats['Win Rate [%]']
+                trades = stats['# Trades']
                 
-                st.markdown(f"### 💰 最終資産: **{int(final_equity):,}円**")
+                # ガチホの成績 (Buy & Hold)
+                buy_hold_return = stats['Buy & Hold Return [%]']
+                # 初期資金 * (1 + 収益率/100) でガチホ最終額を概算
+                buy_hold_equity = cash * (1 + buy_hold_return / 100)
+                buy_hold_profit = buy_hold_equity - cash
                 
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("収支", f"{int(profit):,}円", delta="プラス" if profit > 0 else "マイナス")
-                c2.metric("総収益率", f"{stats['Return [%]']:.1f}%")
-                c3.metric("勝率", f"{stats['Win Rate [%]']:.1f}%")
-                c4.metric("ガチホ収益率", f"{buy_hold:.1f}%", help="何もせず持ち続けた場合の収益率")
+                # --- 結果表示エリア ---
+                st.markdown("### 📊 検証結果レポート")
                 
-                st.write("##### 📈 資産の推移")
-                # 資産曲線の表示
-                equity_curve = stats['_equity_curve']
-                st.line_chart(equity_curve['Equity'])
+                st.markdown("#### 🤖 採用戦略の成績")
+                col1, col2, col3, col4, col5 = st.columns(5)
+                col1.metric("最終資産", f"{int(final_equity):,}円")
+                col2.metric("収支", f"{int(profit):,}円", delta=f"{return_pct:.1f}%")
+                col3.metric("勝率", f"{win_rate:.1f}%")
+                col4.metric("取引回数", f"{trades}回")
+                col5.metric("PF", f"{stats['Profit Factor']:.2f}")
+                
+                st.markdown("#### ✊ ガチホ (ずっと持っていた場合) との比較")
+                col6, col7, col8 = st.columns(3)
+                col6.metric("ガチホ最終資産", f"{int(buy_hold_equity):,}円", help="初日に買って放置した場合の評価額")
+                col7.metric("ガチホ収支", f"{int(buy_hold_profit):,}円", delta=f"{buy_hold_return:.1f}%")
+                
+                # 判定コメント
+                diff = final_equity - buy_hold_equity
+                if diff > 0:
+                    st.success(f"🎉 **戦略の勝利！** ガチホするより **{int(diff):,}円** 多く増えました。")
+                else:
+                    st.error(f"💸 **ガチホの勝利...** ガチホの方が **{int(abs(diff)):,}円** 儲かっていました。")
+                
+                st.write("##### 📈 資産の増減推移")
+                st.line_chart(stats['_equity_curve']['Equity'])
                 
                 with st.expander("詳細データ"): st.dataframe(stats.to_frame().T)
                 
