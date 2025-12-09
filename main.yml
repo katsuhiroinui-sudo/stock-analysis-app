@@ -2,9 +2,8 @@ name: Stock Analysis Workflow
 
 on:
   schedule:
-    # 日本時間の朝9時 (UTC 0:00) に定期実行
     - cron: '0 0 * * *'
-  workflow_dispatch: # 手動実行ボタンを有効化
+  workflow_dispatch:
 
 jobs:
   build:
@@ -27,6 +26,8 @@ jobs:
       env:
         CHANNEL_ACCESS_TOKEN: ${{ secrets.CHANNEL_ACCESS_TOKEN }}
         MY_USER_ID: ${{ secrets.MY_USER_ID }}
+        # スプレッドシート連携用の鍵情報を渡す
+        GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+        SHEET_URL: ${{ secrets.SHEET_URL }}
       run: |
-        # notify.py (分析機能付き) を実行するだけ
         python notify.py
