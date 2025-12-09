@@ -1,345 +1,310 @@
-import streamlit as st
+import requests
+import os
+import sys
+import json
+import time
+from datetime import datetime
 import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
-import mplfinance as mpf
-import matplotlib.font_manager as fm
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import requests
-import json
-import os
-import time
-import streamlit.components.v1 as components
-
-# バックテスト用ライブラリ
 from backtesting import Backtest, Strategy
 from backtesting.lib import crossover
+
+"""
+notify.py (自律型AI・安定版)
+認証方式を実績のあるoauth2clientに戻し、AI分析機能を統合しました。
+"""
 
 # ==========================================
 # 設定エリア
 # ==========================================
+CHANNEL_ACCESS_TOKEN = os.getenv('CHANNEL_ACCESS_TOKEN', '') 
+MY_USER_ID = os.getenv('MY_USER_ID', '')
 SHEET_URL = os.getenv('SHEET_URL', '')
 GCP_KEY_JSON = os.getenv('GCP_SERVICE_ACCOUNT_KEY', '')
 
-# 日本語フォント設定
-font_path = 'ipaexg.ttf'
-try:
-    fm.fontManager.addfont(font_path)
-    font_prop = fm.FontProperties(fname=font_path)
-    font_name = font_prop.get_name()
-    pd.options.plotting.backend = 'matplotlib'
-    import matplotlib.pyplot as plt
-    plt.rc('font', family=font_name)
-except Exception as e:
-    font_name = "sans-serif"
+# バックテスト設定
+BT_PERIOD = "2y"   # 過去何年分で検証するか
+CASH = 1000000     # 検証用資金
 
 # ==========================================
-# 戦略クラスの定義 (Backtesting.py)
+# 1. バックテスト用 戦略クラス定義
 # ==========================================
 
-# 1. SMAクロス戦略
 class SmaCross(Strategy):
     n1 = 5
     n2 = 25
-    
     def init(self):
         close = pd.Series(self.data.Close)
         self.sma1 = self.I(ta.sma, close, self.n1)
         self.sma2 = self.I(ta.sma, close, self.n2)
-    
     def next(self):
-        if crossover(self.sma1, self.sma2):
-            self.buy()
-        elif crossover(self.sma2, self.sma1):
-            self.position.close()
+        if crossover(self.sma1, self.sma2): self.buy()
+        elif crossover(self.sma2, self.sma1): self.position.close()
 
-# 2. RSI逆張り戦略
 class RsiOscillator(Strategy):
-    upper_bound = 70
-    lower_bound = 30
-    rsi_window = 14
-    
+    upper = 70
+    lower = 30
     def init(self):
         close = pd.Series(self.data.Close)
-        self.rsi = self.I(ta.rsi, close, self.rsi_window)
-        
+        self.rsi = self.I(ta.rsi, close, 14)
     def next(self):
-        if crossover(self.rsi, self.lower_bound):
-            self.buy()
-        elif crossover(self.upper_bound, self.rsi):
-            self.position.close()
+        if crossover(self.rsi, self.lower): self.buy()
+        elif crossover(self.upper, self.rsi): self.position.close()
 
-# 3. MACDトレンド戦略
-class MacdStrategy(Strategy):
-    fast = 12
-    slow = 26
-    signal = 9
-    
+class MacdTrend(Strategy):
     def init(self):
         close = pd.Series(self.data.Close)
-        # pandas_taのmacdはDataFrameを返すため、少し工夫が必要
-        # ここでは簡易的にMACDラインとシグナルラインを計算して保持
-        macd_df = ta.macd(close, fast=self.fast, slow=self.slow, signal=self.signal)
-        # 列名: MACD_12_26_9, MACDs_12_26_9, MACDh_12_26_9
-        self.macd = self.I(lambda x: macd_df.iloc[:, 0], close)   # MACD Line
-        self.signal_line = self.I(lambda x: macd_df.iloc[:, 1], close) # Signal Line
-        
+        # pandas_taのmacdはDataFrameを返す
+        macd = ta.macd(close, fast=12, slow=26, signal=9)
+        # 列名: MACD_12_26_9, MACDs_12_26_9
+        self.macd = self.I(lambda: macd.iloc[:, 0])
+        self.signal = self.I(lambda: macd.iloc[:, 1])
     def next(self):
-        if crossover(self.macd, self.signal_line):
-            self.buy()
-        elif crossover(self.signal_line, self.macd):
-            self.position.close()
+        if crossover(self.macd, self.signal): self.buy()
+        elif crossover(self.signal, self.macd): self.position.close()
 
-# 4. ボリンジャーバンド逆張り戦略
-class BollingerBandsStrategy(Strategy):
-    n = 20
-    std = 2
-    
+class BollingerBands(Strategy):
     def init(self):
         close = pd.Series(self.data.Close)
-        bb = ta.bbands(close, length=self.n, std=self.std)
-        # BBL(下), BBM(中), BBU(上)
-        self.lower = self.I(lambda x: bb.iloc[:, 0], close)
-        self.upper = self.I(lambda x: bb.iloc[:, 2], close)
-        
+        bb = ta.bbands(close, length=20, std=2)
+        # 列名: BBL_20_2.0 (下), BBM... (中), BBU... (上)
+        self.lower = self.I(lambda: bb.iloc[:, 0])
+        self.upper = self.I(lambda: bb.iloc[:, 2])
     def next(self):
-        # 下バンドを下回ったら買い（逆張り）
-        if self.data.Close < self.lower:
-            if not self.position.is_long:
-                self.buy()
-        # 上バンドを超えたら手仕舞い
-        elif self.data.Close > self.upper:
+        # 逆張り: 下バンド割れで買い
+        if self.data.Close < self.lower: 
+            if not self.position.is_long: self.buy()
+        # 上バンド超えで手仕舞い
+        elif self.data.Close > self.upper: 
             self.position.close()
 
-# 戦略マッピング
-STRATEGIES = {
-    "SMAクロス (トレンド)": SmaCross,
-    "RSI (逆張り)": RsiOscillator,
-    "MACD (トレンド)": MacdStrategy,
-    "ボリンジャーバンド (逆張り)": BollingerBandsStrategy
-}
+# 戦略リスト
+STRATEGIES = [
+    {"name": "SMAクロス", "class": SmaCross},
+    {"name": "RSI逆張り", "class": RsiOscillator},
+    {"name": "MACD", "class": MacdTrend},
+    {"name": "ボリンジャー", "class": BollingerBands}
+]
 
 # ==========================================
-# スプレッドシート接続関数
+# 2. 実判定ロジック (現在のデータで判定)
 # ==========================================
-def get_sheet_client():
-    if not GCP_KEY_JSON or not SHEET_URL:
-        return None
+def check_signal(strategy_name, df):
+    """
+    選ばれた戦略名に基づいて、直近のデータで売買シグナルが出ているか判定する
+    """
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+    close = float(latest['Close'])
+    
+    # 指標値の取得（計算済み前提）
+    # SMA
+    sma5 = float(latest['SMA_5']) if 'SMA_5' in latest else 0
+    sma25 = float(latest['SMA_25']) if 'SMA_25' in latest else 0
+    prev_sma5 = float(prev['SMA_5']) if 'SMA_5' in prev else 0
+    prev_sma25 = float(prev['SMA_25']) if 'SMA_25' in prev else 0
+    
+    # RSI
+    rsi = float(latest['RSI_14']) if 'RSI_14' in latest else 50
+    
+    # MACD
+    macd = float(latest['MACD_12_26_9']) if 'MACD_12_26_9' in latest else 0
+    signal = float(latest['MACDs_12_26_9']) if 'MACDs_12_26_9' in latest else 0
+    prev_macd = float(prev['MACD_12_26_9']) if 'MACD_12_26_9' in prev else 0
+    prev_signal = float(prev['MACDs_12_26_9']) if 'MACDs_12_26_9' in prev else 0
+    
+    # BB
+    bbl = float(latest['BBL_20_2.0']) if 'BBL_20_2.0' in latest else 0
+    bbu = float(latest['BBU_20_2.0']) if 'BBU_20_2.0' in latest else 0
+
+    # --- 判定ロジック ---
+    if strategy_name == "SMAクロス":
+        if prev_sma5 < prev_sma25 and sma5 > sma25:
+            return "買い", "GC発生", True
+        elif prev_sma5 > prev_sma25 and sma5 < sma25:
+            return "売り", "DC発生", True
+            
+    elif strategy_name == "RSI逆張り":
+        if rsi < 30: return "買い", f"売られすぎ(RSI{rsi:.0f})", True
+        elif rsi > 70: return "売り", f"買われすぎ(RSI{rsi:.0f})", True
+        
+    elif strategy_name == "MACD":
+        if prev_macd < prev_signal and macd > signal:
+            return "買い", "MACD上抜け", True
+        elif prev_macd > prev_signal and macd < signal:
+            return "売り", "MACD下抜け", True
+            
+    elif strategy_name == "ボリンジャー":
+        if close < bbl: return "買い", "バンド下限割れ", True
+        elif close > bbu: return "売り", "バンド上限到達", True
+
+    return "ステイ", "シグナルなし", False
+
+# ==========================================
+# 3. メイン処理
+# ==========================================
+
+def get_tickers_from_sheet():
+    """スプレッドシートからリスト取得 (安定版ロジック)"""
     try:
+        if not GCP_KEY_JSON or not SHEET_URL:
+            print("[ERROR] 設定不足: GCP_KEY_JSON または SHEET_URL がありません")
+            return {}, {}
+
+        # 以前動作していた oauth2client を使用
         key_dict = json.loads(GCP_KEY_JSON)
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
         client = gspread.authorize(creds)
-        return client.open_by_url(SHEET_URL)
+
+        sheet = client.open_by_url(SHEET_URL)
+        
+        holdings_ws = sheet.worksheet('Holdings')
+        watchlist_ws = sheet.worksheet('Watchlist')
+        
+        # データ取得と辞書化 (数値コード対応)
+        holdings = {str(r['Ticker']).strip(): r['Name'] for r in holdings_ws.get_all_records() if r['Ticker']}
+        watchlist = {str(r['Ticker']).strip(): r['Name'] for r in watchlist_ws.get_all_records() if r['Ticker']}
+        
+        return holdings, watchlist
     except Exception as e:
-        st.error(f"スプレッドシート接続エラー: {e}")
-        return None
+        print(f"[ERROR] スプレッドシート読込エラー: {e}")
+        return {}, {}
 
-# ==========================================
-# UI & Main Logic
-# ==========================================
-st.set_page_config(page_title="AI株価監視盤", layout="wide")
-st.title("📈 AI株価一括スキャン & 分析アプリ")
-
-# --- サイドバー: 銘柄リスト管理 ---
-st.sidebar.header("📝 銘柄リスト管理")
-sheet = get_sheet_client()
-df_sheet = pd.DataFrame()
-
-if sheet:
-    mode = st.sidebar.radio("編集モード", ["保有株 (Holdings)", "監視株 (Watchlist)"])
-    ws_name = "Holdings" if "保有" in mode else "Watchlist"
+def analyze_and_optimize(ticker, name, mode="holding"):
+    """
+    各戦略でバックテストを行い、最適なものを採用して判定する
+    """
     try:
-        ws = sheet.worksheet(ws_name)
-        data = ws.get_all_records()
-        df_sheet = pd.DataFrame(data)
-        if not df_sheet.empty:
-            df_sheet = df_sheet.astype(str)
-        st.sidebar.write(f"登録数: {len(df_sheet)}銘柄")
+        # コードの正規化
+        yf_ticker = str(ticker).strip()
+        if yf_ticker.isdigit():
+            yf_ticker = f"{yf_ticker}.T"
+
+        # 1. データ取得
+        time.sleep(1)
+        df = yf.download(yf_ticker, period=BT_PERIOD, interval="1d", progress=False)
         
-        with st.sidebar.expander("➕ 銘柄を追加", expanded=False):
-            with st.form("add_form"):
-                new_code = st.text_input("銘柄コード (数字4桁)")
-                new_name = st.text_input("企業名")
-                submitted = st.form_submit_button("追加する")
-                if submitted and new_code and new_name:
-                    clean_code = new_code.replace('.T', '').replace('.t', '').strip()
-                    if not df_sheet.empty and clean_code in df_sheet['Ticker'].values:
-                        st.sidebar.warning(f"{clean_code} は既に登録されています")
-                    else:
-                        ws.append_row([clean_code, new_name])
-                        st.sidebar.success(f"{new_name} を追加しました！")
-                        time.sleep(1)
-                        st.rerun()
+        if df.empty: return None
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+
+        # 2. 全指標計算 (判定用にまとめて計算)
+        df.ta.sma(length=5, append=True)
+        df.ta.sma(length=25, append=True)
+        df.ta.rsi(length=14, append=True)
+        df.ta.macd(fast=12, slow=26, signal=9, append=True)
+        df.ta.bbands(length=20, std=2, append=True)
+
+        # 3. 戦略総当たりバックテスト
+        best_strat_name = "SMAクロス"
+        best_win_rate = 0
         
-        with st.sidebar.expander("🗑️ 銘柄を削除", expanded=False):
-            if not df_sheet.empty:
-                st.sidebar.dataframe(df_sheet, use_container_width=True, hide_index=True)
-                del_ticker = st.sidebar.selectbox("削除する銘柄を選択", df_sheet['Ticker'].tolist())
-                if st.sidebar.button("削除実行"):
-                    try:
-                        cell = ws.find(del_ticker)
-                        ws.delete_rows(cell.row)
-                        st.sidebar.success("削除しました")
-                        time.sleep(1)
-                        st.rerun()
-                    except Exception as e:
-                        st.sidebar.error(f"エラー: {e}")
-            else:
-                st.sidebar.info("登録なし")
-    except Exception as e:
-        st.sidebar.error(f"シート読み込みエラー: {e}")
-else:
-    st.sidebar.warning("⚠️ API設定なし")
-
-# --- メインエリア: タブ切り替え ---
-tab1, tab2 = st.tabs(["📊 チャート分析", "🧪 バックテスト研究所"])
-
-# 銘柄選択（共通）
-target_tickers = []
-target_dict = {}
-if not df_sheet.empty and 'Ticker' in df_sheet.columns:
-    target_tickers = df_sheet['Ticker'].tolist()
-    target_dict = dict(zip(df_sheet['Ticker'], df_sheet['Name']))
-else:
-    target_tickers = ["7203", "9984", "8306"]
-    target_dict = {t: t for t in target_tickers}
-
-# ==========================================
-# Tab 1: 通常チャート分析
-# ==========================================
-with tab1:
-    st.subheader("リアルタイム チャート分析")
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        selected_ticker = st.selectbox(
-            "分析する銘柄", target_tickers, 
-            format_func=lambda x: f"{x} : {target_dict.get(x, '')}", key="t1"
-        )
-    with col2:
-        period = st.radio("期間", ["3mo", "6mo", "1y"], horizontal=True, index=1, key="p1")
-
-    if st.button("チャート表示 🚀", key="btn1"):
-        yf_code = str(selected_ticker).strip()
-        if yf_code.isdigit(): yf_code = f"{yf_code}.T"
-
-        with st.spinner('データ取得中...'):
+        for strat in STRATEGIES:
             try:
-                df = yf.download(yf_code, period=period, interval='1d', progress=False)
-                if df.empty:
-                    st.error("データなし")
-                else:
-                    if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = df.columns.get_level_values(0)
-
-                    df.ta.rsi(length=14, append=True)
-                    df.ta.sma(length=5, append=True)
-                    df.ta.sma(length=25, append=True)
-                    df.ta.sma(length=75, append=True)
-                    
-                    latest = df.iloc[-1]
-                    prev = df.iloc[-2]
-                    
-                    st.metric(
-                        label=f"現在値 ({latest.name.strftime('%Y-%m-%d')})",
-                        value=f"{int(latest['Close']):,} 円",
-                        delta=f"{latest['Close'] - prev['Close']:.1f} 円"
-                    )
-                    
-                    plots = [
-                        mpf.make_addplot(df['SMA_5'], color='orange', width=1.0),
-                        mpf.make_addplot(df['SMA_25'], color='skyblue', width=1.0),
-                        mpf.make_addplot(df['SMA_75'], color='green', width=1.0),
-                        mpf.make_addplot(df['RSI_14'], color='purple', panel=2, ylabel='RSI')
-                    ]
-                    my_style = mpf.make_mpf_style(base_mpf_style='yahoo', rc={'font.family': font_name})
-                    fig, ax = mpf.plot(
-                        df, type='candle', style=my_style, addplot=plots,
-                        title=f"{selected_ticker} - {target_dict.get(selected_ticker, '')}",
-                        volume=True, figsize=(10, 8), panel_ratios=(6, 2, 2), returnfig=True
-                    )
-                    st.pyplot(fig)
-                    
-                    rsi_val = latest['RSI_14']
-                    if rsi_val < 30: st.success(f"🔵 RSI {rsi_val:.1f} (売られすぎ)")
-                    elif rsi_val > 70: st.warning(f"🔴 RSI {rsi_val:.1f} (買われすぎ)")
-                    else: st.info(f"RSI {rsi_val:.1f} (中立)")
-
-            except Exception as e:
-                st.error(f"エラー: {e}")
-
-# ==========================================
-# Tab 2: バックテスト研究所
-# ==========================================
-with tab2:
-    st.subheader("🧪 戦略シミュレーション")
-    st.info("過去のデータを使って、「もしそのルールで売買していたらどうなっていたか？」を検証します。")
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        bt_ticker = st.selectbox(
-            "検証する銘柄", target_tickers, 
-            format_func=lambda x: f"{x} : {target_dict.get(x, '')}", key="t2"
-        )
-    with col2:
-        strategy_name = st.selectbox("戦略を選択", list(STRATEGIES.keys()))
-    with col3:
-        cash = st.number_input("初期資金 (円)", value=1000000, step=100000)
-
-    if st.button("バックテスト実行 ⚔️", key="btn2"):
-        yf_code = str(bt_ticker).strip()
-        if yf_code.isdigit(): yf_code = f"{yf_code}.T"
-        
-        with st.spinner('シミュレーション中...'):
-            try:
-                # バックテストは長期間で検証したほうが信頼性が高いので2年分取得
-                df_bt = yf.download(yf_code, period="2y", interval='1d', progress=False)
-                
-                if isinstance(df_bt.columns, pd.MultiIndex):
-                    df_bt.columns = df_bt.columns.get_level_values(0)
-                
-                # backtestingライブラリ用のカラム名チェック
-                # Open, High, Low, Close, Volume が必要
-                
-                # 実行
-                bt = Backtest(df_bt, STRATEGIES[strategy_name], cash=cash, commission=.002)
+                # バックテスト実行
+                bt = Backtest(df, strat["class"], cash=CASH, commission=.002)
                 stats = bt.run()
-                
-                # --- 結果表示 ---
-                st.markdown("### 🏆 検証結果")
-                
-                # メトリクス表示
-                m1, m2, m3, m4 = st.columns(4)
                 win_rate = stats['Win Rate [%]']
-                ret = stats['Return [%]']
-                trades = stats['# Trades']
-                pf = stats['Profit Factor']
                 
-                m1.metric("勝率", f"{win_rate:.1f}%")
-                m2.metric("総収益率", f"{ret:.1f}%", delta_color="normal" if ret > 0 else "inverse")
-                m3.metric("取引回数", f"{trades}回")
-                m4.metric("プロフィットファクター", f"{pf:.2f}")
-                
-                st.markdown("---")
-                
-                # 詳細データ
-                with st.expander("詳細データを見る"):
-                    st.dataframe(stats.to_frame().T)
-                
-                # チャート表示 (HTML)
-                st.markdown("### 📉 売買ポイントの確認")
-                st.caption("▲: 買いエントリー / ▼: 売り/決済")
-                
-                # プロットをHTMLファイルとして保存し、読み込んで表示
-                try:
-                    bt.plot(filename='plot.html', open_browser=False)
-                    with open('plot.html', 'r', encoding='utf-8') as f:
-                        html_string = f.read()
-                    components.html(html_string, height=600, scrolling=True)
-                except Exception as plot_e:
-                    st.warning(f"チャート描画エラー: {plot_e}")
-                    st.write("※ 環境によってはインタラクティブチャートが表示できない場合があります。")
+                # 勝率が高いものを採用
+                if win_rate > best_win_rate:
+                    best_win_rate = win_rate
+                    best_strat_name = strat["name"]
+            except Exception:
+                continue # エラーが出た戦略はスキップ
 
-            except Exception as e:
-                st.error(f"バックテストエラー: {e}")
+        # 4. 最適戦略に基づいて現状判定
+        action, reason, is_signal = check_signal(best_strat_name, df)
+        
+        # 5. 前日比
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+        close = float(latest['Close'])
+        price_diff = close - float(prev['Close'])
+        pct = (price_diff / float(prev['Close'])) * 100
+        price_str = f"{int(close):,}円 ({'+' if price_diff>0 else ''}{pct:.1f}%)"
+
+        # --- 通知フィルタ ---
+        if mode == "watching" and not is_signal:
+            return None
+
+        # 6. レポート作成
+        icon = "👀" if mode == "holding" else "🔔"
+        if "買い" in action: icon = "🚀"
+        elif "売り" in action: icon = "🔻"
+        
+        report = f"{icon} 【{name}】 ({ticker})\n"
+        report += f"株価: {price_str}\n"
+        report += f"判定: {action}\n"
+        report += f"採用AI: {best_strat_name} (勝率{best_win_rate:.0f}%)\n"
+        if is_signal or mode == "holding":
+            report += f"根拠: {reason}\n"
+        
+        report += "-" * 10
+        return report
+
+    except Exception as e:
+        return f"【{name}】 エラー: {e}\n"
+
+def send_line_push(message):
+    if not CHANNEL_ACCESS_TOKEN or not MY_USER_ID:
+        print("[ERROR] LINE設定不足")
+        return False
+    
+    url = 'https://api.line.me/v2/bot/message/push'
+    headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {CHANNEL_ACCESS_TOKEN}'}
+    payload = {'to': MY_USER_ID, 'messages': [{'type': 'text', 'text': message}]}
+    
+    try:
+        requests.post(url, headers=headers, data=json.dumps(payload), timeout=10)
+        return True
+    except:
+        return False
+
+def main():
+    print(f"--- AI自動分析開始: {datetime.now()} ---")
+    
+    # シート取得
+    holdings, watchlist = get_tickers_from_sheet()
+    
+    reports = []
+    
+    # 保有株
+    if holdings:
+        reports.append("【 💰 保有株 AI診断 】")
+        for c, n in holdings.items():
+            r = analyze_and_optimize(c, n, mode="holding")
+            if r: reports.append(r)
+            
+    # 監視株
+    watch_reports = []
+    if watchlist:
+        for c, n in watchlist.items():
+            r = analyze_and_optimize(c, n, mode="watching")
+            if r: watch_reports.append(r)
+            
+    if watch_reports:
+        reports.append("\n【 🔍 チャンス到来銘柄 】")
+        reports.extend(watch_reports)
+    
+    if not reports:
+        print("通知対象なし")
+        return
+
+    full_message = f"🤖 AI株価最適化レポート\n📅 {datetime.now().strftime('%m/%d')}\n\n"
+    full_message += "\n".join(reports)
+    
+    print(full_message) # ログ用
+    
+    if len(full_message) > 2000:
+        send_line_push(full_message[:2000] + "\n...(省略)...")
+    else:
+        send_line_push(full_message)
+    
+    print("通知完了")
+
+if __name__ == "__main__":
+    main()
