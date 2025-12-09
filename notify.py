@@ -9,19 +9,28 @@ import pandas as pd
 import pandas_ta as ta
 
 """
-notify.py (統合版・修正済み)
-データのMultiIndex問題に対応し、株価分析結果を通知します。
+notify.py (詳細分析版)
+企業名表示、前日比、売買アクション判定機能を追加
 """
 
 # ==========================================
 # 設定エリア
 # ==========================================
 
-# 監視銘柄リスト
-TICKERS = [
-    "7453.T", "7203.T", "8306.T", "9984.T", "7011.T", 
-    "8136.T", "6752.T", "6501.T", "6758.T", "7267.T"
-]
+# 監視銘柄と企業名のマッピング
+# 必要に応じて追加・変更してください
+TICKER_MAP = {
+    "7453.T": "良品計画",
+    "7203.T": "トヨタ自動車",
+    "8306.T": "三菱UFJ",
+    "9984.T": "ソフトバンクG",
+    "7011.T": "三菱重工",
+    "8136.T": "サンリオ",
+    "6752.T": "パナソニックHD",
+    "6501.T": "日立製作所",
+    "6758.T": "ソニーG",
+    "7267.T": "ホンダ"
+}
 
 # API設定 (GitHub Secretsから読み込み)
 CHANNEL_ACCESS_TOKEN = os.getenv('CHANNEL_ACCESS_TOKEN', '') 
@@ -30,16 +39,18 @@ MY_USER_ID = os.getenv('MY_USER_ID', '')
 # ==========================================
 
 def analyze_ticker(ticker):
-    """1銘柄のデータを取得して分析レポートを作成"""
+    """1銘柄のデータを取得して詳細レポートを作成"""
     try:
+        # 企業名の取得（リストになければコードそのまま）
+        company_name = TICKER_MAP.get(ticker, ticker)
+
         # データ取得
         df = yf.download(ticker, period="3mo", interval="1d", progress=False)
         
         if df.empty:
             return None
 
-        # 【修正ポイント】MultiIndex（2段カラム）になっていたら1段にする
-        # Close, Openなどのカラム名だけに整理します
+        # MultiIndex対応
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
@@ -48,37 +59,70 @@ def analyze_ticker(ticker):
         df.ta.sma(length=5, append=True)
         df.ta.sma(length=25, append=True)
         
-        # 最新データ
+        # データ抽出
         latest = df.iloc[-1]
         prev = df.iloc[-2]
         
-        # 値の抽出
-        # 値が存在しない場合のハンドリングを追加
-        close = float(latest['Close']) if not pd.isna(latest['Close']) else 0
-        rsi = float(latest['RSI_14']) if 'RSI_14' in latest and not pd.isna(latest['RSI_14']) else 50
-        sma5 = float(latest['SMA_5']) if 'SMA_5' in latest and not pd.isna(latest['SMA_5']) else 0
-        sma25 = float(latest['SMA_25']) if 'SMA_25' in latest and not pd.isna(latest['SMA_25']) else 0
+        close = float(latest['Close'])
+        prev_close = float(prev['Close'])
         
-        prev_sma5 = float(prev['SMA_5']) if 'SMA_5' in prev and not pd.isna(prev['SMA_5']) else 0
-        prev_sma25 = float(prev['SMA_25']) if 'SMA_25' in prev and not pd.isna(prev['SMA_25']) else 0
+        # 指標（NaNケア付き）
+        rsi = float(latest['RSI_14']) if not pd.isna(latest['RSI_14']) else 50.0
+        sma5 = float(latest['SMA_5']) if not pd.isna(latest['SMA_5']) else 0.0
+        sma25 = float(latest['SMA_25']) if not pd.isna(latest['SMA_25']) else 0.0
         
-        # シグナル判定
-        signals = []
-        if rsi < 30: signals.append("🔵 売られすぎ")
-        if rsi > 70: signals.append("🔴 買われすぎ")
-        if prev_sma5 < prev_sma25 and sma5 > sma25: signals.append("📈 GC(買い)")
-        if prev_sma5 > prev_sma25 and sma5 < sma25: signals.append("📉 DC(売り)")
+        prev_sma5 = float(prev['SMA_5']) if not pd.isna(prev['SMA_5']) else 0.0
+        prev_sma25 = float(prev['SMA_25']) if not pd.isna(prev['SMA_25']) else 0.0
         
-        # レポートテキスト作成
-        report = f"【{ticker}】 {int(close):,}円\n"
-        report += f"RSI:{rsi:.0f} | 5MA:{int(sma5)}/25MA:{int(sma25)}\n"
-        if signals:
-            report += "⚡ " + ",".join(signals) + "\n"
+        # --- 1. 前日比計算 ---
+        price_diff = close - prev_close
+        price_change_pct = (price_diff / prev_close) * 100
+        sign = "+" if price_diff > 0 else ""
+        price_str = f"{int(close):,}円 ({sign}{price_change_pct:.1f}%)"
+
+        # --- 2. アクション判定 ---
+        action = "ステイ" # デフォルト
+        reasons = []
+
+        # RSI判定
+        if rsi < 30:
+            action = "買い (逆張り)"
+            reasons.append("RSI売られすぎ")
+        elif rsi > 70:
+            action = "売り (過熱感)"
+            reasons.append("RSI買われすぎ")
+            
+        # GC/DC判定 (トレンドフォロー優先)
+        if prev_sma5 < prev_sma25 and sma5 > sma25:
+            action = "買い"
+            reasons.append("ゴールデンクロス")
+        elif prev_sma5 > prev_sma25 and sma5 < sma25:
+            action = "売り"
+            reasons.append("デッドクロス")
+            
+        # --- 3. レポートテキスト生成 ---
+        # 見やすさ重視で整形
+        report = f"【{company_name}】 ({ticker})\n"
+        report += f"株価: {price_str}\n"
+        
+        # アクションを目立たせる
+        icon = "🤔"
+        if "買い" in action: icon = "🚀"
+        elif "売り" in action: icon = "🔻"
+        
+        report += f"判定: {icon} {action}\n"
+        
+        # テクニカル詳細（少し小さく表示されるイメージで）
+        report += f"指標: RSI:{rsi:.0f} | 5MA:{int(sma5)}/25MA:{int(sma25)}\n"
+        
+        if reasons:
+            report += f"根拠: {', '.join(reasons)}\n"
+            
+        report += "-" * 15 # 区切り線
             
         return report
 
     except Exception as e:
-        # エラー詳細を少し分かりやすく
         return f"【{ticker}】 エラー: {e}\n"
 
 def send_line_push(message):
@@ -110,21 +154,22 @@ def main():
     print(f"--- 分析開始: {datetime.now()} ---")
     
     reports = []
-    for t in TICKERS:
-        rep = analyze_ticker(t)
+    # 定義したマップのキー（銘柄コード）を使ってループ
+    for ticker in TICKER_MAP.keys():
+        rep = analyze_ticker(ticker)
         if rep:
             reports.append(rep)
             
     if not reports:
         print("[WARN] データが取得できませんでした")
-        # エラーでも通知して気づけるようにする
-        send_line_push("【エラー報告】株価データの取得に失敗しました。ログを確認してください。")
         return
 
     # 全文結合
-    full_message = f"📉 株価分析レポート ({datetime.now().strftime('%m/%d')})\n\n"
+    # タイトル
+    full_message = f"📊 株価AI分析レポート\n📅 {datetime.now().strftime('%Y/%m/%d')}\n\n"
     full_message += "\n".join(reports)
     
+    # ログ出力（デバッグ用）
     print(full_message)
     
     # LINE送信
