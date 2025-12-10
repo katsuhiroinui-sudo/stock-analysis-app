@@ -7,3 +7,5 @@ backtesting
 requests
 gspread
 oauth2client
+xlrd
+openpyxl
