@@ -42,10 +42,18 @@ except:
 @st.cache_data
 def get_jpx_ticker_list():
     """東証の全銘柄リストを取得してキャッシュする"""
+    default_list = [
+        "7203: トヨタ自動車", "9984: ソフトバンクグループ", "8306: 三菱UFJフィナンシャル・グループ",
+        "6758: ソニーグループ", "6861: キーエンス", "6098: リクルートホールディングス",
+        "9432: 日本電信電話", "4063: 信越化学工業", "8035: 東京エレクトロン",
+        "9861: 吉野家ホールディングス", "7267: ホンダ", "5401: 日本製鉄"
+    ]
     try:
         # 日本取引所グループから公式リストをダウンロード
         url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+        # xlrdが必要です (requirements.txtに追加済み前提)
         df = pd.read_excel(url)
+        
         # 必要なカラム: 'コード', '銘柄名'
         # コードは数字のみになっていることが多いので文字列化
         df['コード'] = df['コード'].astype(str).str.strip()
@@ -54,13 +62,13 @@ def get_jpx_ticker_list():
         # 検索用のリストを作成 ["7203: トヨタ自動車", ...]
         search_list = [f"{row['コード']}: {row['銘柄名']}" for _, row in df.iterrows()]
         return search_list
-    except Exception:
+    except ImportError:
+        st.warning("⚠️ 銘柄リストの読み込みに必要な 'xlrd' が見つかりません。requirements.txtを確認してください。現在は主要銘柄のみ表示しています。")
+        return default_list
+    except Exception as e:
         # 取得失敗時は主要銘柄のみのダミーリストを返す
-        return [
-            "7203: トヨタ自動車", "9984: ソフトバンクグループ", "8306: 三菱UFJフィナンシャル・グループ",
-            "6758: ソニーグループ", "6861: キーエンス", "6098: リクルートホールディングス",
-            "9432: 日本電信電話", "4063: 信越化学工業", "8035: 東京エレクトロン"
-        ]
+        st.warning(f"⚠️ 銘柄リストの取得に失敗しました ({e})。現在は主要銘柄のみ表示しています。")
+        return default_list
 
 # ==========================================
 # 1. AI分析用 戦略クラス定義
@@ -185,27 +193,24 @@ if sheet:
         if not df_sheet.empty: df_sheet = df_sheet.astype(str)
         st.sidebar.write(f"登録数: {len(df_sheet)}銘柄")
         
-        # --- 🔍 検索機能付き追加フォーム (アップデート箇所) ---
+        # --- 🔍 検索機能付き追加フォーム ---
         with st.sidebar.expander("🔍 銘柄を検索して追加", expanded=False):
             # 全銘柄リストの読み込み (キャッシュされるので高速)
             all_tickers = get_jpx_ticker_list()
             
             # 検索ボックス (セレクトボックス)
-            # ユーザーが文字を入力すると絞り込まれる
             selected_item = st.selectbox(
                 "銘柄名やコードで検索", 
-                options=[""] + all_tickers, # 先頭は空にしておく
+                options=[""] + all_tickers,
                 format_func=lambda x: x if x else "ここに入力して検索..."
             )
             
             if st.button("リストに追加する"):
                 if selected_item:
-                    # "7203: トヨタ自動車" -> "7203", "トヨタ自動車" に分割
                     try:
                         code, name = selected_item.split(": ", 1)
                         clean_code = code.strip()
                         
-                        # 重複チェック
                         if not df_sheet.empty and clean_code in df_sheet['Ticker'].values:
                             st.sidebar.warning(f"⚠️ {name} ({clean_code}) は既に登録済みです")
                         else:
@@ -218,7 +223,7 @@ if sheet:
                 else:
                     st.sidebar.error("銘柄を選択してください")
         
-        # --- 従来の手動追加フォーム (念のため残す) ---
+        # --- 従来の手動追加フォーム ---
         with st.sidebar.expander("✏️ 手動で追加"):
             with st.form("manual_add"):
                 c = st.text_input("コード(数字4桁)")
@@ -255,6 +260,7 @@ if not df_sheet.empty and 'Ticker' in df_sheet.columns:
     target_tickers = df_sheet['Ticker'].tolist()
     target_dict = dict(zip(df_sheet['Ticker'], df_sheet['Name']))
 else:
+    # デフォルト (APIなし用)
     target_tickers = ["7203", "9984", "8306"]
     target_dict = {t: t for t in target_tickers}
 
@@ -277,6 +283,7 @@ with tab1:
                 else:
                     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
                     
+                    # 指標計算
                     df.ta.sma(length=5, append=True)
                     df.ta.sma(length=25, append=True)
                     df.ta.sma(length=75, append=True)
@@ -320,6 +327,7 @@ with tab2:
                 bt = Backtest(df, STRATEGY_MAP[s2], cash=cash, commission=.002)
                 stats = bt.run()
                 
+                # --- 結果計算 (金額ベース) ---
                 final_equity = stats['Equity Final [$]']
                 profit = final_equity - cash
                 return_pct = stats['Return [%]']
@@ -327,11 +335,14 @@ with tab2:
                 trades = stats['# Trades']
                 pf = stats['Profit Factor']
                 
+                # ガチホ計算 (Buy & Hold)
                 buy_hold_return = stats['Buy & Hold Return [%]']
                 buy_hold_equity = cash * (1 + buy_hold_return / 100)
                 buy_hold_profit = buy_hold_equity - cash
                 
+                # --- 結果表示 ---
                 st.markdown("### 📊 検証結果レポート")
+                
                 col1, col2, col3, col4, col5 = st.columns(5)
                 col1.metric("最終資産", f"{int(final_equity):,}円")
                 col2.metric("収支", f"{int(profit):,}円", delta=f"{return_pct:.1f}%")
