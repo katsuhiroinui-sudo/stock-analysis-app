@@ -37,6 +37,32 @@ except:
     font_name = "sans-serif"
 
 # ==========================================
+# 0. 銘柄リスト取得 (検索用キャッシュ)
+# ==========================================
+@st.cache_data
+def get_jpx_ticker_list():
+    """東証の全銘柄リストを取得してキャッシュする"""
+    try:
+        # 日本取引所グループから公式リストをダウンロード
+        url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+        df = pd.read_excel(url)
+        # 必要なカラム: 'コード', '銘柄名'
+        # コードは数字のみになっていることが多いので文字列化
+        df['コード'] = df['コード'].astype(str).str.strip()
+        df['銘柄名'] = df['銘柄名'].str.strip()
+        
+        # 検索用のリストを作成 ["7203: トヨタ自動車", ...]
+        search_list = [f"{row['コード']}: {row['銘柄名']}" for _, row in df.iterrows()]
+        return search_list
+    except Exception:
+        # 取得失敗時は主要銘柄のみのダミーリストを返す
+        return [
+            "7203: トヨタ自動車", "9984: ソフトバンクグループ", "8306: 三菱UFJフィナンシャル・グループ",
+            "6758: ソニーグループ", "6861: キーエンス", "6098: リクルートホールディングス",
+            "9432: 日本電信電話", "4063: 信越化学工業", "8035: 東京エレクトロン"
+        ]
+
+# ==========================================
 # 1. AI分析用 戦略クラス定義
 # ==========================================
 
@@ -101,10 +127,8 @@ def check_current_signal(strategy_name, df):
         prev = df.iloc[-2]
         close = float(latest['Close'])
         
-        # 値取得ヘルパー
         def g(row, k, d=0): return float(row[k]) if k in row and not pd.isna(row[k]) else d
 
-        # 指標値
         sma5, sma25 = g(latest,'SMA_5'), g(latest,'SMA_25')
         p_sma5, p_sma25 = g(prev,'SMA_5'), g(prev,'SMA_25')
         rsi = g(latest,'RSI_14', 50)
@@ -161,8 +185,42 @@ if sheet:
         if not df_sheet.empty: df_sheet = df_sheet.astype(str)
         st.sidebar.write(f"登録数: {len(df_sheet)}銘柄")
         
-        with st.sidebar.expander("➕ 銘柄を追加"):
-            with st.form("add"):
+        # --- 🔍 検索機能付き追加フォーム (アップデート箇所) ---
+        with st.sidebar.expander("🔍 銘柄を検索して追加", expanded=False):
+            # 全銘柄リストの読み込み (キャッシュされるので高速)
+            all_tickers = get_jpx_ticker_list()
+            
+            # 検索ボックス (セレクトボックス)
+            # ユーザーが文字を入力すると絞り込まれる
+            selected_item = st.selectbox(
+                "銘柄名やコードで検索", 
+                options=[""] + all_tickers, # 先頭は空にしておく
+                format_func=lambda x: x if x else "ここに入力して検索..."
+            )
+            
+            if st.button("リストに追加する"):
+                if selected_item:
+                    # "7203: トヨタ自動車" -> "7203", "トヨタ自動車" に分割
+                    try:
+                        code, name = selected_item.split(": ", 1)
+                        clean_code = code.strip()
+                        
+                        # 重複チェック
+                        if not df_sheet.empty and clean_code in df_sheet['Ticker'].values:
+                            st.sidebar.warning(f"⚠️ {name} ({clean_code}) は既に登録済みです")
+                        else:
+                            ws.append_row([clean_code, name])
+                            st.sidebar.success(f"✅ {name} を追加しました！")
+                            time.sleep(1)
+                            st.rerun()
+                    except ValueError:
+                        st.sidebar.error("銘柄データの形式が不正です")
+                else:
+                    st.sidebar.error("銘柄を選択してください")
+        
+        # --- 従来の手動追加フォーム (念のため残す) ---
+        with st.sidebar.expander("✏️ 手動で追加"):
+            with st.form("manual_add"):
                 c = st.text_input("コード(数字4桁)")
                 n = st.text_input("企業名")
                 if st.form_submit_button("追加"):
@@ -197,7 +255,6 @@ if not df_sheet.empty and 'Ticker' in df_sheet.columns:
     target_tickers = df_sheet['Ticker'].tolist()
     target_dict = dict(zip(df_sheet['Ticker'], df_sheet['Name']))
 else:
-    # デフォルト (APIなし用)
     target_tickers = ["7203", "9984", "8306"]
     target_dict = {t: t for t in target_tickers}
 
@@ -220,7 +277,6 @@ with tab1:
                 else:
                     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
                     
-                    # 指標計算
                     df.ta.sma(length=5, append=True)
                     df.ta.sma(length=25, append=True)
                     df.ta.sma(length=75, append=True)
@@ -264,44 +320,38 @@ with tab2:
                 bt = Backtest(df, STRATEGY_MAP[s2], cash=cash, commission=.002)
                 stats = bt.run()
                 
-                # --- 結果計算 ---
-                # 戦略の成績
                 final_equity = stats['Equity Final [$]']
                 profit = final_equity - cash
                 return_pct = stats['Return [%]']
                 win_rate = stats['Win Rate [%]']
                 trades = stats['# Trades']
+                pf = stats['Profit Factor']
                 
-                # ガチホの成績 (Buy & Hold)
                 buy_hold_return = stats['Buy & Hold Return [%]']
-                # 初期資金 * (1 + 収益率/100) でガチホ最終額を概算
                 buy_hold_equity = cash * (1 + buy_hold_return / 100)
                 buy_hold_profit = buy_hold_equity - cash
                 
-                # --- 結果表示エリア ---
                 st.markdown("### 📊 検証結果レポート")
-                
-                st.markdown("#### 🤖 採用戦略の成績")
                 col1, col2, col3, col4, col5 = st.columns(5)
                 col1.metric("最終資産", f"{int(final_equity):,}円")
                 col2.metric("収支", f"{int(profit):,}円", delta=f"{return_pct:.1f}%")
-                col3.metric("勝率", f"{win_rate:.1f}%")
-                col4.metric("取引回数", f"{trades}回")
-                col5.metric("PF", f"{stats['Profit Factor']:.2f}")
+                col3.metric("取引回数", f"{trades}回")
+                col4.metric("勝率", f"{win_rate:.1f}%")
+                col5.metric("PF", f"{pf:.2f}")
                 
-                st.markdown("#### ✊ ガチホ (ずっと持っていた場合) との比較")
-                col6, col7, col8 = st.columns(3)
-                col6.metric("ガチホ最終資産", f"{int(buy_hold_equity):,}円", help="初日に買って放置した場合の評価額")
-                col7.metric("ガチホ収支", f"{int(buy_hold_profit):,}円", delta=f"{buy_hold_return:.1f}%")
+                st.markdown("---")
                 
-                # 判定コメント
+                c_hold1, c_hold2 = st.columns(2)
+                c_hold1.metric("✊ ガチホの最終資産", f"{int(buy_hold_equity):,}円")
+                c_hold2.metric("ガチホ収支", f"{int(buy_hold_profit):,}円", delta=f"{buy_hold_return:.1f}%")
+                
                 diff = final_equity - buy_hold_equity
                 if diff > 0:
-                    st.success(f"🎉 **戦略の勝利！** ガチホするより **{int(diff):,}円** 多く増えました。")
+                    st.success(f"🎉 **戦略の勝利です！** ガチホより **{int(diff):,}円** お得でした。")
                 else:
-                    st.error(f"💸 **ガチホの勝利...** ガチホの方が **{int(abs(diff)):,}円** 儲かっていました。")
+                    st.error(f"🐢 **ガチホの勝利です...** ガチホの方が **{int(abs(diff)):,}円** お得でした。")
                 
-                st.write("##### 📈 資産の増減推移")
+                st.write("##### 📈 資産の推移")
                 st.line_chart(stats['_equity_curve']['Equity'])
                 
                 with st.expander("詳細データ"): st.dataframe(stats.to_frame().T)
@@ -336,7 +386,6 @@ with tab3:
                     st.stop()
                 if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
                 
-                # 指標一括計算
                 df.ta.sma(length=5, append=True)
                 df.ta.sma(length=25, append=True)
                 df.ta.rsi(length=14, append=True)
