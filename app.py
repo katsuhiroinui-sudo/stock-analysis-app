@@ -37,40 +37,6 @@ except:
     font_name = "sans-serif"
 
 # ==========================================
-# 0. 銘柄リスト取得 (検索用キャッシュ)
-# ==========================================
-@st.cache_data
-def get_jpx_ticker_list():
-    """東証の全銘柄リストを取得してキャッシュする"""
-    default_list = [
-        "7203: トヨタ自動車", "9984: ソフトバンクグループ", "8306: 三菱UFJフィナンシャル・グループ",
-        "6758: ソニーグループ", "6861: キーエンス", "6098: リクルートホールディングス",
-        "9432: 日本電信電話", "4063: 信越化学工業", "8035: 東京エレクトロン",
-        "9861: 吉野家ホールディングス", "7267: ホンダ", "5401: 日本製鉄"
-    ]
-    try:
-        # 日本取引所グループから公式リストをダウンロード
-        url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
-        # xlrdが必要です (requirements.txtに追加済み前提)
-        df = pd.read_excel(url)
-        
-        # 必要なカラム: 'コード', '銘柄名'
-        # コードは数字のみになっていることが多いので文字列化
-        df['コード'] = df['コード'].astype(str).str.strip()
-        df['銘柄名'] = df['銘柄名'].str.strip()
-        
-        # 検索用のリストを作成 ["7203: トヨタ自動車", ...]
-        search_list = [f"{row['コード']}: {row['銘柄名']}" for _, row in df.iterrows()]
-        return search_list
-    except ImportError:
-        st.warning("⚠️ 銘柄リストの読み込みに必要な 'xlrd' が見つかりません。requirements.txtを確認してください。現在は主要銘柄のみ表示しています。")
-        return default_list
-    except Exception as e:
-        # 取得失敗時は主要銘柄のみのダミーリストを返す
-        st.warning(f"⚠️ 銘柄リストの取得に失敗しました ({e})。現在は主要銘柄のみ表示しています。")
-        return default_list
-
-# ==========================================
 # 1. AI分析用 戦略クラス定義
 # ==========================================
 
@@ -135,8 +101,10 @@ def check_current_signal(strategy_name, df):
         prev = df.iloc[-2]
         close = float(latest['Close'])
         
+        # 値取得ヘルパー
         def g(row, k, d=0): return float(row[k]) if k in row and not pd.isna(row[k]) else d
 
+        # 指標値
         sma5, sma25 = g(latest,'SMA_5'), g(latest,'SMA_25')
         p_sma5, p_sma25 = g(prev,'SMA_5'), g(prev,'SMA_25')
         rsi = g(latest,'RSI_14', 50)
@@ -335,6 +303,10 @@ with tab2:
                 trades = stats['# Trades']
                 pf = stats['Profit Factor']
                 
+                # リスク指標 (追加)
+                max_drawdown = stats['Max. Drawdown [%]']
+                sharpe = stats['Sharpe Ratio']
+                
                 # ガチホ計算 (Buy & Hold)
                 buy_hold_return = stats['Buy & Hold Return [%]']
                 buy_hold_equity = cash * (1 + buy_hold_return / 100)
@@ -343,24 +315,40 @@ with tab2:
                 # --- 結果表示 ---
                 st.markdown("### 📊 検証結果レポート")
                 
+                # 1段目: 基本成績
                 col1, col2, col3, col4, col5 = st.columns(5)
-                col1.metric("最終資産", f"{int(final_equity):,}円")
-                col2.metric("収支", f"{int(profit):,}円", delta=f"{return_pct:.1f}%")
-                col3.metric("取引回数", f"{trades}回")
-                col4.metric("勝率", f"{win_rate:.1f}%")
+                col1.metric("最終資産", f"{int(final_equity):,}円", delta=f"{int(profit):,}円")
+                col2.metric("総収益率", f"{return_pct:.1f}%")
+                col3.metric("勝率", f"{win_rate:.1f}%")
+                col4.metric("取引回数", f"{trades}回")
                 col5.metric("PF", f"{pf:.2f}")
+                
+                # 2段目: リスク指標 (追加)
+                col6, col7 = st.columns(2)
+                col6.metric("最大ドローダウン", f"{max_drawdown:.1f}%", help="資産が最大でどれくらい減ったか（リスクの大きさ）")
+                col7.metric("シャープレシオ", f"{sharpe:.2f}", help="リスクに対するリターンの効率。1以上なら優秀")
                 
                 st.markdown("---")
                 
+                # 3段目: ガチホとの比較
                 c_hold1, c_hold2 = st.columns(2)
-                c_hold1.metric("✊ ガチホの最終資産", f"{int(buy_hold_equity):,}円")
-                c_hold2.metric("ガチホ収支", f"{int(buy_hold_profit):,}円", delta=f"{buy_hold_return:.1f}%")
+                c_hold1.metric(
+                    label="✊ ガチホの最終資産", 
+                    value=f"{int(buy_hold_equity):,}円", 
+                    help="2年前に買って売らずに持っていた場合の評価額"
+                )
+                c_hold2.metric(
+                    label="ガチホ収支", 
+                    value=f"{int(buy_hold_profit):,}円", 
+                    delta=f"{buy_hold_return:.1f}%"
+                )
                 
+                # 勝敗判定メッセージ
                 diff = final_equity - buy_hold_equity
                 if diff > 0:
-                    st.success(f"🎉 **戦略の勝利です！** ガチホより **{int(diff):,}円** お得でした。")
+                    st.success(f"🎉 **戦略の勝利です！** ガチホするよりも **{int(diff):,}円** 多く利益が出ました。")
                 else:
-                    st.error(f"🐢 **ガチホの勝利です...** ガチホの方が **{int(abs(diff)):,}円** お得でした。")
+                    st.error(f"🐢 **ガチホの勝利です...** 素直に持って寝ていた方が **{int(abs(diff)):,}円** お得でした。")
                 
                 st.write("##### 📈 資産の推移")
                 st.line_chart(stats['_equity_curve']['Equity'])
@@ -397,6 +385,7 @@ with tab3:
                     st.stop()
                 if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
                 
+                # 指標一括計算
                 df.ta.sma(length=5, append=True)
                 df.ta.sma(length=25, append=True)
                 df.ta.rsi(length=14, append=True)
