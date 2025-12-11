@@ -9,12 +9,19 @@ import pandas as pd
 import pandas_ta as ta
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from backtesting import Backtest, Strategy
-from backtesting.lib import crossover
+
+# バックテスト用ライブラリ
+try:
+    from backtesting import Backtest, Strategy
+    from backtesting.lib import crossover
+except ImportError:
+    print("[ERROR] backtestingライブラリが見つかりません。pip install backtesting を確認してください。")
+    sys.exit(1)
 
 """
-notify.py (自律型AI・安定版)
-認証方式を実績のあるoauth2clientに戻し、AI分析機能を統合しました。
+notify.py (AI戦略コンシェルジュ統合版)
+仕様書に基づき、全戦略をバックテスト検証した上で、
+その銘柄に最適な戦略に基づいて売買判断を行います。
 """
 
 # ==========================================
@@ -25,12 +32,8 @@ MY_USER_ID = os.getenv('MY_USER_ID', '')
 SHEET_URL = os.getenv('SHEET_URL', '')
 GCP_KEY_JSON = os.getenv('GCP_SERVICE_ACCOUNT_KEY', '')
 
-# バックテスト設定
-BT_PERIOD = "2y"   # 過去何年分で検証するか
-CASH = 1000000     # 検証用資金
-
 # ==========================================
-# 1. バックテスト用 戦略クラス定義
+# 1. AI分析用 戦略クラス定義 (app.pyより移植)
 # ==========================================
 
 class SmaCross(Strategy):
@@ -57,9 +60,7 @@ class RsiOscillator(Strategy):
 class MacdTrend(Strategy):
     def init(self):
         close = pd.Series(self.data.Close)
-        # pandas_taのmacdはDataFrameを返す
         macd = ta.macd(close, fast=12, slow=26, signal=9)
-        # 列名: MACD_12_26_9, MACDs_12_26_9
         self.macd = self.I(lambda: macd.iloc[:, 0])
         self.signal = self.I(lambda: macd.iloc[:, 1])
     def next(self):
@@ -70,18 +71,14 @@ class BollingerBands(Strategy):
     def init(self):
         close = pd.Series(self.data.Close)
         bb = ta.bbands(close, length=20, std=2)
-        # 列名: BBL_20_2.0 (下), BBM... (中), BBU... (上)
         self.lower = self.I(lambda: bb.iloc[:, 0])
         self.upper = self.I(lambda: bb.iloc[:, 2])
     def next(self):
-        # 逆張り: 下バンド割れで買い
         if self.data.Close < self.lower: 
             if not self.position.is_long: self.buy()
-        # 上バンド超えで手仕舞い
         elif self.data.Close > self.upper: 
             self.position.close()
 
-# 戦略リスト
 STRATEGIES = [
     {"name": "SMAクロス", "class": SmaCross},
     {"name": "RSI逆張り", "class": RsiOscillator},
@@ -90,71 +87,12 @@ STRATEGIES = [
 ]
 
 # ==========================================
-# 2. 実判定ロジック (現在のデータで判定)
-# ==========================================
-def check_signal(strategy_name, df):
-    """
-    選ばれた戦略名に基づいて、直近のデータで売買シグナルが出ているか判定する
-    """
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
-    close = float(latest['Close'])
-    
-    # 指標値の取得（計算済み前提）
-    # SMA
-    sma5 = float(latest['SMA_5']) if 'SMA_5' in latest else 0
-    sma25 = float(latest['SMA_25']) if 'SMA_25' in latest else 0
-    prev_sma5 = float(prev['SMA_5']) if 'SMA_5' in prev else 0
-    prev_sma25 = float(prev['SMA_25']) if 'SMA_25' in prev else 0
-    
-    # RSI
-    rsi = float(latest['RSI_14']) if 'RSI_14' in latest else 50
-    
-    # MACD
-    macd = float(latest['MACD_12_26_9']) if 'MACD_12_26_9' in latest else 0
-    signal = float(latest['MACDs_12_26_9']) if 'MACDs_12_26_9' in latest else 0
-    prev_macd = float(prev['MACD_12_26_9']) if 'MACD_12_26_9' in prev else 0
-    prev_signal = float(prev['MACDs_12_26_9']) if 'MACDs_12_26_9' in prev else 0
-    
-    # BB
-    bbl = float(latest['BBL_20_2.0']) if 'BBL_20_2.0' in latest else 0
-    bbu = float(latest['BBU_20_2.0']) if 'BBU_20_2.0' in latest else 0
-
-    # --- 判定ロジック ---
-    if strategy_name == "SMAクロス":
-        if prev_sma5 < prev_sma25 and sma5 > sma25:
-            return "買い", "GC発生", True
-        elif prev_sma5 > prev_sma25 and sma5 < sma25:
-            return "売り", "DC発生", True
-            
-    elif strategy_name == "RSI逆張り":
-        if rsi < 30: return "買い", f"売られすぎ(RSI{rsi:.0f})", True
-        elif rsi > 70: return "売り", f"買われすぎ(RSI{rsi:.0f})", True
-        
-    elif strategy_name == "MACD":
-        if prev_macd < prev_signal and macd > signal:
-            return "買い", "MACD上抜け", True
-        elif prev_macd > prev_signal and macd < signal:
-            return "売り", "MACD下抜け", True
-            
-    elif strategy_name == "ボリンジャー":
-        if close < bbl: return "買い", "バンド下限割れ", True
-        elif close > bbu: return "売り", "バンド上限到達", True
-
-    return "ステイ", "シグナルなし", False
-
-# ==========================================
-# 3. メイン処理
+# 2. 判定ロジック
 # ==========================================
 
 def get_tickers_from_sheet():
-    """スプレッドシートからリスト取得 (安定版ロジック)"""
+    """スプレッドシートから保有株と監視株のリストを取得"""
     try:
-        if not GCP_KEY_JSON or not SHEET_URL:
-            print("[ERROR] 設定不足: GCP_KEY_JSON または SHEET_URL がありません")
-            return {}, {}
-
-        # 以前動作していた oauth2client を使用
         key_dict = json.loads(GCP_KEY_JSON)
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
@@ -165,83 +103,148 @@ def get_tickers_from_sheet():
         holdings_ws = sheet.worksheet('Holdings')
         watchlist_ws = sheet.worksheet('Watchlist')
         
-        # データ取得と辞書化 (数値コード対応)
         holdings = {str(r['Ticker']).strip(): r['Name'] for r in holdings_ws.get_all_records() if r['Ticker']}
         watchlist = {str(r['Ticker']).strip(): r['Name'] for r in watchlist_ws.get_all_records() if r['Ticker']}
         
         return holdings, watchlist
     except Exception as e:
-        print(f"[ERROR] スプレッドシート読込エラー: {e}")
+        print(f"[ERROR] スプレッドシート読み込み失敗: {e}")
         return {}, {}
 
-def analyze_and_optimize(ticker, name, mode="holding"):
+def check_current_signal(strategy_name, df):
     """
-    各戦略でバックテストを行い、最適なものを採用して判定する
+    選ばれた最適戦略に基づいて、最新の売買シグナルを判定する
     """
     try:
-        # コードの正規化
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+        close = float(latest['Close'])
+        
+        # 安全な値取得ヘルパー
+        def g(row, k, d=0): return float(row[k]) if k in row and not pd.isna(row[k]) else d
+
+        sma5, sma25 = g(latest,'SMA_5'), g(latest,'SMA_25')
+        p_sma5, p_sma25 = g(prev,'SMA_5'), g(prev,'SMA_25')
+        rsi = g(latest,'RSI_14', 50)
+        macd, sig = g(latest,'MACD_12_26_9'), g(latest,'MACDs_12_26_9')
+        p_macd, p_sig = g(prev,'MACD_12_26_9'), g(prev,'MACDs_12_26_9')
+        bbl, bbu = g(latest,'BBL_20_2.0'), g(latest,'BBU_20_2.0')
+
+        action = "ステイ"
+        reason = "シグナルなし"
+
+        if strategy_name == "SMAクロス":
+            if p_sma5 < p_sma25 and sma5 > sma25: 
+                action, reason = "買い 🚀", "ゴールデンクロス"
+            elif p_sma5 > p_sma25 and sma5 < sma25: 
+                action, reason = "売り 🔻", "デッドクロス"
+                
+        elif strategy_name == "RSI逆張り":
+            if rsi < 30: 
+                action, reason = "買い 🚀", f"売られすぎ(RSI{rsi:.0f})"
+            elif rsi > 70: 
+                action, reason = "売り 🔻", f"買われすぎ(RSI{rsi:.0f})"
+                
+        elif strategy_name == "MACD":
+            if p_macd < p_sig and macd > sig: 
+                action, reason = "買い 🚀", "MACD上抜け"
+            elif p_macd > p_sig and macd < sig: 
+                action, reason = "売り 🔻", "MACD下抜け"
+                
+        elif strategy_name == "ボリンジャー":
+            if close < bbl: 
+                action, reason = "買い 🚀", "バンド下限割れ"
+            elif close > bbu: 
+                action, reason = "売り 🔻", "バンド上限到達"
+            
+        return action, reason, rsi, close
+    except Exception as e:
+        return "判定不能", f"エラー: {e}", 0, 0
+
+def analyze_ticker(ticker, name, mode="holding"):
+    """
+    AI分析実行関数
+    1. 過去2年のデータを取得
+    2. 全戦略をバックテスト (総当たり)
+    3. 勝率が最も高い「最適戦略」を選出
+    4. その戦略に基づき、今日の売買判断を行う
+    """
+    try:
         yf_ticker = str(ticker).strip()
         if yf_ticker.isdigit():
             yf_ticker = f"{yf_ticker}.T"
 
-        # 1. データ取得
-        time.sleep(1)
-        df = yf.download(yf_ticker, period=BT_PERIOD, interval="1d", progress=False)
+        # バックテスト用に長めの期間を取得 (2年)
+        time.sleep(1) 
+        df = yf.download(yf_ticker, period="2y", interval="1d", progress=False)
         
         if df.empty: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
 
-        # 2. 全指標計算 (判定用にまとめて計算)
+        # 判定用テクニカル指標を一括計算 (check_current_signalで使用)
         df.ta.sma(length=5, append=True)
         df.ta.sma(length=25, append=True)
         df.ta.rsi(length=14, append=True)
         df.ta.macd(fast=12, slow=26, signal=9, append=True)
         df.ta.bbands(length=20, std=2, append=True)
 
-        # 3. 戦略総当たりバックテスト
-        best_strat_name = "SMAクロス"
-        best_win_rate = 0
+        # --- AI総当たりバックテスト開始 ---
+        best_strat = None
+        best_win_rate = -1
+        
+        # 簡易化のため現金100万固定でテスト
+        cash = 1000000
         
         for strat in STRATEGIES:
             try:
                 # バックテスト実行
-                bt = Backtest(df, strat["class"], cash=CASH, commission=.002)
+                bt = Backtest(df, strat["class"], cash=cash, commission=.002)
                 stats = bt.run()
                 win_rate = stats['Win Rate [%]']
                 
-                # 勝率が高いものを採用
+                # 勝率でベスト戦略を更新 (NaNの場合は0扱い)
+                if pd.isna(win_rate): win_rate = 0
+                
                 if win_rate > best_win_rate:
                     best_win_rate = win_rate
-                    best_strat_name = strat["name"]
-            except Exception:
-                continue # エラーが出た戦略はスキップ
-
-        # 4. 最適戦略に基づいて現状判定
-        action, reason, is_signal = check_signal(best_strat_name, df)
+                    best_strat = strat["name"]
+            except:
+                continue
         
-        # 5. 前日比
+        if not best_strat:
+            best_strat = "SMAクロス" # デフォルト
+
+        # --- 今日のシグナル判定 ---
+        action, reason, rsi_val, close_val = check_current_signal(best_strat, df)
+        
+        # 前日比計算
         latest = df.iloc[-1]
         prev = df.iloc[-2]
-        close = float(latest['Close'])
-        price_diff = close - float(prev['Close'])
-        pct = (price_diff / float(prev['Close'])) * 100
-        price_str = f"{int(close):,}円 ({'+' if price_diff>0 else ''}{pct:.1f}%)"
+        diff = latest['Close'] - prev['Close']
+        pct = (diff / prev['Close']) * 100
+        sign = "+" if diff > 0 else ""
+        price_str = f"{int(close_val):,}円 ({sign}{pct:.1f}%)"
 
-        # --- 通知フィルタ ---
+        is_signal = "🚀" in action or "🔻" in action
+
+        # 監視モードでシグナルなしならスキップ
         if mode == "watching" and not is_signal:
             return None
 
-        # 6. レポート作成
+        # レポート作成
         icon = "👀" if mode == "holding" else "🔔"
-        if "買い" in action: icon = "🚀"
-        elif "売り" in action: icon = "🔻"
+        if "買い" in action: icon = "🔥" # AI推奨買い
         
-        report = f"{icon} 【{name}】 ({ticker})\n"
-        report += f"株価: {price_str}\n"
-        report += f"判定: {action}\n"
-        report += f"採用AI: {best_strat_name} (勝率{best_win_rate:.0f}%)\n"
+        report = f"{icon} 【{name}】\n"
+        report += f"価格: {price_str}\n"
+        report += f"採用AI: {best_strat} (勝率{best_win_rate:.0f}%)\n"
+        report += f"判断: {action}\n"
+        
         if is_signal or mode == "holding":
             report += f"根拠: {reason}\n"
+            # 補足情報
+            if best_strat == "RSI逆張り":
+                report += f"参考: RSI {rsi_val:.0f}\n"
         
         report += "-" * 10
         return report
@@ -265,39 +268,39 @@ def send_line_push(message):
         return False
 
 def main():
-    print(f"--- AI自動分析開始: {datetime.now()} ---")
+    print(f"--- AI分析開始: {datetime.now()} ---")
     
-    # シート取得
+    if not GCP_KEY_JSON or not SHEET_URL:
+        print("[ERROR] Google Sheets設定(Secrets)がありません")
+        return
+
     holdings, watchlist = get_tickers_from_sheet()
     
     reports = []
     
-    # 保有株
     if holdings:
         reports.append("【 💰 保有株 AI診断 】")
-        for c, n in holdings.items():
-            r = analyze_and_optimize(c, n, mode="holding")
-            if r: reports.append(r)
+        for code, name in holdings.items():
+            rep = analyze_ticker(code, name, mode="holding")
+            if rep: reports.append(rep)
             
-    # 監視株
     watch_reports = []
     if watchlist:
-        for c, n in watchlist.items():
-            r = analyze_and_optimize(c, n, mode="watching")
-            if r: watch_reports.append(r)
+        for code, name in watchlist.items():
+            rep = analyze_ticker(code, name, mode="watching")
+            if rep: watch_reports.append(rep)
             
     if watch_reports:
-        reports.append("\n【 🔍 チャンス到来銘柄 】")
+        reports.append("\n【 🔍 監視株 AI推奨 】")
         reports.extend(watch_reports)
     
     if not reports:
         print("通知対象なし")
         return
 
-    full_message = f"🤖 AI株価最適化レポート\n📅 {datetime.now().strftime('%m/%d')}\n\n"
+    full_message = f"🧠 AI投資アシスタント ({datetime.now().strftime('%m/%d')})\n"
+    full_message += "過去2年の検証に基づく最適戦略で判断します。\n\n"
     full_message += "\n".join(reports)
-    
-    print(full_message) # ログ用
     
     if len(full_message) > 2000:
         send_line_push(full_message[:2000] + "\n...(省略)...")
